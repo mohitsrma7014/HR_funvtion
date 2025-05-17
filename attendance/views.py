@@ -90,21 +90,18 @@ class ProcessAttendanceAPI(APIView):
         )
         offset = timedelta(hours=5, minutes=30)
 
+        # Replace the manual punch filtering with this:
         manual_punches = ManualPunch.objects.filter(
             employee__in=employees
         ).filter(
-            Q(punch_in_time__date__gte=start_date, punch_in_time__date__lt=end_date) |
-            Q(punch_out_time__date__gte=start_date, punch_out_time__date__lt=end_date)
+            Q(punch_in_time__date__gte=start_date, punch_in_time__date__lt=end_date + timedelta(days=1)) |
+            Q(punch_out_time__date__gte=start_date, punch_out_time__date__lt=end_date + timedelta(days=1))
         ).select_related('employee')
 
         # Apply +5:30 manually
         for punch in manual_punches:
             punch.punch_in_time = punch.punch_in_time + offset if punch.punch_in_time else None
             punch.punch_out_time = punch.punch_out_time + offset if punch.punch_out_time else None
-        print(manual_punches)
-        print("Manual punches:", manual_punches)
-        for mp in manual_punches:
-            print(f"Employee: {mp.employee_id}, In: {mp.punch_in_time}, Out: {mp.punch_out_time}")
         
         # Step 5: Fetch punch logs from all machines
         punch_logs = self.fetch_punch_logs(start_date, end_date)
@@ -474,8 +471,18 @@ class ProcessAttendanceAPI(APIView):
                     day_punches.append(log)
             
             # Add manual punches
-            manual_in = next((mp for mp in emp_manual_punches 
-                            if mp.punch_in_time and mp.punch_in_time.date() == date), None)
+            manual_in = next((
+                mp for mp in emp_manual_punches 
+                if mp.punch_in_time and 
+                (
+                    mp.punch_in_time.date() == date or 
+                    (
+                        mp.punch_in_time.date() == date + timedelta(days=1) and 
+                        mp.punch_in_time.time() < time(12, 0)
+                    )
+                )
+            ), None)
+
             if manual_in:
     # Ensure the manual punch time is timezone-aware
                 punch_in_time = django_timezone.make_aware(manual_in.punch_in_time) if not django_timezone.is_aware(manual_in.punch_in_time) else manual_in.punch_in_time
@@ -488,8 +495,18 @@ class ProcessAttendanceAPI(APIView):
                 day_record['manual_reason'] = manual_in.reason
 
             
-            manual_out = next((mp for mp in emp_manual_punches 
-                             if mp.punch_out_time and mp.punch_out_time.date() == date), None)
+            manual_out = next((
+                mp for mp in emp_manual_punches 
+                if mp.punch_out_time and 
+                (
+                    mp.punch_out_time.date() == date or 
+                    (
+                        mp.punch_out_time.date() == date + timedelta(days=1) and 
+                        mp.punch_out_time.time() < time(12, 0)
+                    )
+                )
+            ), None)
+
             if manual_out:
                 # Ensure the manual punch time is timezone-aware
                 punch_out_time = django_timezone.make_aware(manual_out.punch_out_time) if not django_timezone.is_aware(manual_out.punch_out_time) else manual_out.punch_out_time
@@ -553,11 +570,23 @@ class ProcessAttendanceAPI(APIView):
             
             elif day_record['shift_type'] == 'NIGHT':
                 # For night shift, we need to look at punches from current evening to next morning
-                night_start = django_timezone.make_aware(datetime.combine(date, time(18, 0)))
-                night_end = django_timezone.make_aware(datetime.combine(date + timedelta(days=1), time(12, 0)))
+                night_start = django_timezone.make_aware(datetime.combine(date, time(16, 0)))  # 4 PM
+                night_end = django_timezone.make_aware(datetime.combine(date + timedelta(days=1), time(12, 0))) 
                 
                 # Get all punches in this extended window
                 night_punches = [log for log in emp_logs if night_start <= log['datetime'] < night_end]
+                if manual_in:
+                    night_punches.append({
+                        'employee_id': employee.employee_id,
+                        'datetime': manual_in.punch_in_time,
+                        'is_manual': True
+                    })
+                if manual_out:
+                    night_punches.append({
+                        'employee_id': employee.employee_id,
+                        'datetime': manual_out.punch_out_time,
+                        'is_manual': True
+                    })
                 
                 if len(night_punches) >= 2:
                     # Sort by time
@@ -1024,11 +1053,12 @@ class MissedPunchReportAPI(APIView):
             holiday_date__lt=end_date
         )
         
+        # Replace the manual punch filtering with this:
         manual_punches = ManualPunch.objects.filter(
             employee__in=employees
         ).filter(
-            Q(punch_in_time__date__gte=start_date, punch_in_time__date__lt=end_date) |
-            Q(punch_out_time__date__gte=start_date, punch_out_time__date__lt=end_date)
+            Q(punch_in_time__date__gte=start_date, punch_in_time__date__lt=end_date + timedelta(days=1)) |
+            Q(punch_out_time__date__gte=start_date, punch_out_time__date__lt=end_date + timedelta(days=1))
         ).select_related('employee')
         
         # Fetch punch logs from all machines
