@@ -243,3 +243,28 @@ class ProcessedAttendance(models.Model):
         
     def __str__(self):
         return f"{self.employee.employee_name} - {self.month}/{self.year}"
+    
+from django.core.exceptions import ValidationError
+
+class ProcessedSalary(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE)
+    month = models.PositiveSmallIntegerField()
+    year = models.PositiveSmallIntegerField()
+    data = models.JSONField()  # Stores all the salary calculation details
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('employee', 'month', 'year')
+        verbose_name_plural = 'Processed Salaries'
+        indexes = [
+            models.Index(fields=['month', 'year']),
+            models.Index(fields=['employee']),
+        ]
+
+    def clean(self):
+        if self.month < 1 or self.month > 12:
+            raise ValidationError("Month must be between 1 and 12")
+        
+    def __str__(self):
+        return f"{self.employee.employee_name} - {self.month}/{self.year}"

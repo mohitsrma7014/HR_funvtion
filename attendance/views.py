@@ -232,6 +232,7 @@ class ProcessAttendanceAPI(APIView):
                         continue
         return logs
     
+    
     def process_employee_attendance(self, employee, start_date, end_date, gate_passes, 
                                   shift_assignments, od_slips, sunday_replacements, 
                                   holidays, manual_punches, punch_logs):
@@ -263,6 +264,7 @@ class ProcessAttendanceAPI(APIView):
             'total_working_hours': Decimal('0.0'),
             'total_overtime_hours': Decimal('0.0'),
             'od_slips': [] 
+            
         }
 
         replaced_sundays = 0
@@ -273,7 +275,32 @@ class ProcessAttendanceAPI(APIView):
         present_days = Decimal('0.0')
         absent_days = Decimal('0.0')
         half_days = Decimal('0.0')
-        
+
+
+        def round_overtime(overtime_hours):
+            """
+            Round overtime to nearest 30 minutes (0.5 hours) but always round up
+            if there's any overtime (minimum 0.5 hours)
+            """
+            if overtime_hours <= 0:
+                return Decimal('0.0')
+            
+            # Convert to minutes
+            total_minutes = overtime_hours * 60
+            
+            # Round up to nearest 30 minutes
+            rounded_minutes = math.ceil(total_minutes / 30) * 30
+            
+            # Convert back to hours
+            rounded_hours = Decimal(str(rounded_minutes / 60))
+            return min(rounded_hours, Decimal('4.0'))
+
+        def adjust_manual_punch_time(punch_time, is_manual):
+            """Adjust manual punch time by subtracting 5:30 hours if it's a manual punch"""
+            if is_manual and punch_time:
+                return punch_time - timedelta(hours=5, minutes=30)
+            return punch_time
+                
         # Get employee's punch logs
         emp_logs = [log for log in punch_logs if log['employee_id'] == employee.employee_id]
         # In your process_employee_attendance method, add debug logging:
@@ -386,6 +413,13 @@ class ProcessAttendanceAPI(APIView):
                 day_record['status'] = 'On Duty'
                 result['extra_days']['od_days'] += Decimal(str(od_slip.extra_days))
                 result['extra_days']['od_hours'] += Decimal(str(od_slip.extra_hours))  # Add OD hour
+                result['od_slips'].append({
+                    'date': od_slip.od_date,
+                    'hours': od_slip.extra_hours,
+                    'days': od_slip.extra_days,
+                    'reason': od_slip.reason,
+                    'approved_by': od_slip.approved_by
+                })
 
                 # Build the od_display string
                 od_display = []
@@ -393,6 +427,7 @@ class ProcessAttendanceAPI(APIView):
                     od_display.append(f"{int(od_slip.extra_days)}d")
                 if od_slip.extra_hours:
                     od_display.append(f"{int(od_slip.extra_hours)}h")
+                day_record['remarks'] = f"OD - {' '.join(od_display)}"
                 
                 if od_display:
                     if result['extra_days']['od_display']:
@@ -401,20 +436,18 @@ class ProcessAttendanceAPI(APIView):
                     else:
                         result['extra_days']['od_display'] = ' '.join(od_display)
 
-                result['od_slips'].append({
-                    'date': od_slip.od_date,
-                    'hours': od_slip.extra_hours,
-                    'days': od_slip.extra_days,
-                    'reason': od_slip.reason,
-                    'approved_by': od_slip.approved_by
-                })
+              
+                total_od_days = int(result['extra_days']['od_days'])
+                total_od_hours = int(result['extra_days']['od_hours'])
                 # Convert hours and days to a combined string like "1d 5h"
                 od_display = []
-                if od_slip.extra_days:
-                    od_display.append(f"{int(od_slip.extra_days)}d")
-                if od_slip.extra_hours:
-                    od_display.append(f"{int(od_slip.extra_hours)}h")
-                day_record['remarks'] = f"OD - {' '.join(od_display)}"
+                if total_od_days > 0:
+                    od_display.append(f"{total_od_days}d")
+                if total_od_hours > 0:
+                    od_display.append(f"{total_od_hours}h")
+                
+                result['extra_days']['od_display'] = ' '.join(od_display) if od_display else ''
+                
 
             
             # Check for gate pass
@@ -544,18 +577,23 @@ class ProcessAttendanceAPI(APIView):
                         result['total_present_days'] += Decimal('0.5')
                     else:
                         result['total_present_days'] += Decimal('1.0')
+
+                    
                     
                     # Calculate overtime if eligible
-                    if employee.is_getting_ot:
+                    if employee.is_getting_ot and not day_record['is_od']:
                         scheduled_out_dt = django_timezone.make_aware(datetime.combine(date, day_record['scheduled_out']))
                         if out_dt.tzinfo is None:
                             out_dt = timezone.make_aware(out_dt)  # Only make it aware if it is naive
+                        if day_record['is_manual_out']:
+                            out_dt = adjust_manual_punch_time(out_dt, True)
                         if scheduled_out_dt.tzinfo is None:
                             scheduled_out_dt = timezone.make_aware(scheduled_out_dt)  # Same for scheduled_out_dt
                         if out_dt > scheduled_out_dt:
                             overtime = (out_dt - scheduled_out_dt).total_seconds() / 3600
-                            day_record['overtime_hours'] = Decimal(str(round(overtime, 2)))
-                            result['total_overtime_hours'] += day_record['overtime_hours']
+                            rounded_overtime = round_overtime(overtime)
+                            day_record['overtime_hours'] = rounded_overtime
+                            result['total_overtime_hours'] += rounded_overtime
                     
                     # NEW: Handle single punch case
                 elif len(day_punches) == 1 and not gate_pass:
@@ -625,15 +663,22 @@ class ProcessAttendanceAPI(APIView):
                             result['total_present_days'] += Decimal('1.0')
                         
                         # Calculate overtime if eligible
-                        if employee.is_getting_ot:
+                        if employee.is_getting_ot and not day_record['is_od']:
                             scheduled_out_dt = django_timezone.make_aware(datetime.combine(
                                 date + timedelta(days=1),
                                 day_record['scheduled_out']
                             ))
+                            out_punch = night_punches[-1]['datetime']
+                            if day_record['is_manual_out']:
+                                out_punch = adjust_manual_punch_time(out_punch, True)
+                            # Ensure out_punch is timezone-aware
+                            if not django_timezone.is_aware(out_punch):
+                                out_punch = django_timezone.make_aware(out_punch)
                             if out_punch > scheduled_out_dt:
                                 overtime = (out_punch - scheduled_out_dt).total_seconds() / 3600
-                                day_record['overtime_hours'] = Decimal(str(round(overtime, 2)))
-                                result['total_overtime_hours'] += day_record['overtime_hours']
+                                rounded_overtime = round_overtime(overtime)
+                                day_record['overtime_hours'] = rounded_overtime
+                                result['total_overtime_hours'] += rounded_overtime
                     else:
                         day_record['remarks'] = 'Night shift validation failed - check timings'
                 else:
@@ -1315,7 +1360,7 @@ from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .models import ProcessedAttendance, Employee
+from .models import ProcessedAttendance, Employee,ProcessedSalary
 import math
 from datetime import datetime
 
@@ -1324,6 +1369,64 @@ class SalaryCalculationAPI(APIView):
     API endpoint for calculating employee salaries based on attendance data.
     Handles large datasets efficiently with optimized queries.
     """
+    def post(self, request, format=None):
+        """
+        Save processed salary data for a month/year
+        """
+        month = request.data.get('month')
+        year = request.data.get('year')
+        results = request.data.get('results', [])
+        
+        if not month or not year:
+            return Response(
+                {"error": "Both month and year parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            month = int(month)
+            year = int(year)
+            if month < 1 or month > 12:
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "Invalid month or year format"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if data already exists for this month/year
+        if ProcessedSalary.objects.filter(month=month, year=year).exists():
+            return Response(
+                {"error": "Salary data already processed for this month/year"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create salary records in bulk
+        salary_records = []
+        for result in results:
+            try:
+                employee = Employee.objects.get(employee_id=result['employee_id'])
+                salary_records.append(ProcessedSalary(
+                    employee=employee,
+                    month=month,
+                    year=year,
+                    data=result
+                ))
+            except Employee.DoesNotExist:
+                continue  # Or collect these missing employees for error reporting
+
+        
+        try:
+            ProcessedSalary.objects.bulk_create(salary_records)
+            return Response(
+                {"message": f"Successfully saved {len(salary_records)} salary records"},
+                status=status.HTTP_201_CREATED
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     def get(self, request, format=None):
         month = request.query_params.get('month')
@@ -1484,7 +1587,7 @@ class SalaryCalculationAPI(APIView):
         
         # ESIC calculation (0.75% of gross if salary <= 22500)
         esic = 0
-        if employee.salary <= 22500:
+        if employee.salary <= 21100:
             esic = round(gross_salary * 0.0075, 2)
         
         # HRA (50% of basic)

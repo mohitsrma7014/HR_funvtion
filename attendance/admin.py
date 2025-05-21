@@ -70,3 +70,13 @@ class ProcessedAttendanceAdmin(admin.ModelAdmin):
     search_fields = ('employee__employee_name',)
     list_filter = ('month', 'year', 'employee')
     ordering = ('-processed_date',)
+
+
+from .models import ProcessedSalary
+
+@admin.register(ProcessedSalary)
+class ProcessedSalaryAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'month', 'year', 'created_at', 'updated_at')
+    list_filter = ('month', 'year', 'employee')
+    search_fields = ('employee__employee_name',)
+    ordering = ('-year', '-month')
