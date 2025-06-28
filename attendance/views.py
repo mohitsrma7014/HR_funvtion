@@ -2,6 +2,7 @@ import requests
 # from datetime import datetime, timedelta, time
 # from django.db.models import Q
 from rest_framework.views import APIView
+from datetime import date
 # from rest_framework.response import Response
 # from rest_framework import status
 # from django.utils import timezone
@@ -13,8 +14,8 @@ from .models import Employee,Holiday,ShiftAssignment,SundayReplacement,GatePass,
 # from django.db import models
 # from .models import ProcessedAttendance
 # from datetime import date
-# from django.core.serializers.json import DjangoJSONEncoder
-# import json
+from django.core.serializers.json import DjangoJSONEncoder
+import json
 # from django.utils import timezone
 # from datetime import timezone as datetime_timezone  # Python's built-in timezone
 # from django.utils import timezone as django_timezone  # Django's timezone utilities
@@ -1668,18 +1669,18 @@ class ProcessAttendanceAPI(APIView):
         })
         
     def save_processed_data(self, results, month, year):
-        """Save processed data to database"""
         saved_records = []
         for employee_data in results:
             try:
                 employee = Employee.objects.get(employee_id=employee_data['employee_id'])
                 
+                # Create or update processed attendance record
                 record, created = ProcessedAttendance.objects.update_or_create(
                     employee=employee,
                     month=month,
                     year=year,
                     defaults={
-                        'attendance_data': employee_data
+                        'attendance_data': json.loads(json.dumps(employee_data, cls=DjangoJSONEncoder))
                     }
                 )
                 saved_records.append(record.id)
@@ -1690,6 +1691,21 @@ class ProcessAttendanceAPI(APIView):
                 continue
         
         return saved_records
+
+    def convert_dates_to_strings(self, data):
+        """Recursively convert date objects to ISO format strings"""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, (dict, list)):
+                    self.convert_dates_to_strings(value)
+                elif isinstance(value, date):
+                    data[key] = value.isoformat()
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if isinstance(item, (dict, list)):
+                    self.convert_dates_to_strings(item)
+                elif isinstance(item, date):
+                    data[i] = item.isoformat()
 # views.py
 from rest_framework import viewsets, filters
 from django_filters.rest_framework import DjangoFilterBackend
@@ -1774,16 +1790,32 @@ class ManualPunchFilter(django_filters.FilterSet):
     class Meta:
         model = ManualPunch
         fields = ['employee_id', 'employee_name', 'date', 'date_range']
+from .serializers import  EmployeeDocumentSerializer,EmployeeSerializeradvance
+from rest_framework.decorators import action
+from .models import  EmployeeDocument
+
+class EmployeeViewSetadvance(viewsets.ReadOnlyModelViewSet):
+    queryset = Employee.objects.all()
+    serializer_class = EmployeeSerializeradvance
+    search_fields = ['employee_name', 'employee_id']
+    ordering_fields = ['employee_name', 'id']
+    ordering = ['employee_name']
 
 # ViewSets for each model
 class EmployeeViewSet(viewsets.ModelViewSet):
-    queryset = Employee.objects.all().select_related()
+    queryset = Employee.objects.all().prefetch_related('documents')
     serializer_class = EmployeeSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = EmployeeFilter
     search_fields = ['employee_id', 'employee_name', 'father_name']
-    ordering_fields = ['employee_id', 'employee_name', 'employee_department']
+    ordering_fields = ['employee_id', 'employee_name', 'employee_department', 'joining_date']
     ordering = ['employee_id']
+
+    def get_serializer_context(self):
+        """Add request to serializer context for generating absolute URLs"""
+        context = super().get_serializer_context()
+        context['request'] = self.request
+        return context
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
@@ -1805,7 +1837,132 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         self.perform_create(serializer)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get', 'post'])
+    def documents(self, request, pk=None):
+        """Endpoint for managing employee documents"""
+        employee = self.get_object()
+        
+        if request.method == 'GET':
+            documents = employee.documents.all()
+            serializer = EmployeeDocumentSerializer(
+                documents, 
+                many=True, 
+                context={'request': request}
+            )
+            return Response(serializer.data)
+            
+        elif request.method == 'POST':
+            data = request.data.copy()
+            data['employee'] = employee.id
+            
+            serializer = EmployeeDocumentSerializer(
+                data=data, 
+                context={'request': request}
+            )
+            
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+                
+            logger.error("Document upload validation error: %s", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['patch', 'post'])
+    def profile_picture(self, request, pk=None):
+        """Endpoint for updating profile picture"""
+        employee = self.get_object()
+        
+        if 'profile_picture' not in request.data:
+            return Response(
+                {'error': 'No profile picture provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        serializer = self.get_serializer(
+            employee,
+            data={'profile_picture': request.data['profile_picture']},
+            partial=True
+        )
+        
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+            
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'])
+    def recent_joiners(self, request):
+        """Custom endpoint for recently joined employees"""
+        queryset = self.get_queryset().filter(
+            joining_date__isnull=False
+        ).order_by('-joining_date')[:10]
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+from django.core.exceptions import ValidationError
+from django.shortcuts import get_object_or_404
+
+
+from django.shortcuts import get_object_or_404
+
+class EmployeeDocumentViewSet(viewsets.ModelViewSet):
+    queryset = EmployeeDocument.objects.all()
+    serializer_class = EmployeeDocumentSerializer
     
+    def get_queryset(self):
+        employee_id = self.kwargs.get('employee_pk')
+        return self.queryset.filter(employee_id=employee_id)
+    
+    def perform_create(self, serializer):
+        employee_id = self.kwargs['employee_pk']
+        employee = get_object_or_404(Employee, pk=employee_id)
+        serializer.save(employee=employee)
+
+    def create(self, request, *args, **kwargs):
+        employee_id = self.kwargs['employee_pk']
+        employee = get_object_or_404(Employee, pk=employee_id)
+        
+        # Add employee to serializer context
+        serializer = self.get_serializer(data=request.data)
+        serializer.context['employee'] = employee
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers
+        )
+
+from .serializers import EmployeeSerializerdocu, EmployeeDocumentSerializerdoc
+from rest_framework import generics
+
+class ActiveEmployeeListAPIView(generics.ListAPIView):
+    """
+    API endpoint to list all active employees (for dropdown selection)
+    """
+    queryset = Employee.objects.filter(is_active=True).order_by('employee_name')
+    serializer_class = EmployeeSerializerdocu
+
+class EmployeeDocumentListCreateAPIView(generics.ListCreateAPIView):
+    queryset = EmployeeDocument.objects.all().order_by('-uploaded_at')
+    serializer_class = EmployeeDocumentSerializerdoc
+
+    def get_queryset(self):
+        employee_id = self.request.query_params.get('employee_id', None)
+        if employee_id:
+            return self.queryset.filter(employee__employee_id=employee_id)
+        return self.queryset
+    
+class EmployeeDocumentRetrieveUpdateDestroyAPIView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    API endpoint to retrieve, update, or delete an employee document
+    """
+    queryset = EmployeeDocument.objects.all()
+    serializer_class = EmployeeDocumentSerializerdoc
+    lookup_field = 'id'
+
 class EmployeeViewSet1(viewsets.ModelViewSet):
     queryset = Employee.objects.all().select_related()
     serializer_class = EmployeeSerializer
@@ -2291,9 +2448,11 @@ from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .models import ProcessedAttendance, Employee,ProcessedSalary
+from .models import ProcessedAttendance, Employee,ProcessedSalary,SalaryAdvance
 import math
 from datetime import datetime
+from django.db.models import Sum
+
 
 class SalaryCalculationAPI(APIView):
     """
@@ -2397,7 +2556,7 @@ class SalaryCalculationAPI(APIView):
             employee_id__in=employee_ids
         ).only(
             'employee_id', 'employee_name', 'employee_department', 'salary',
-            'is_getting_sunday', 'is_getting_ot', 'no_of_cl', 'employee_type','working_hours'
+            'is_getting_sunday', 'is_getting_ot', 'no_of_cl', 'employee_type','working_hours','is_getting_pf','is_monthly_salary','incentive'
         )
         
         # Create a dictionary for quick employee lookup
@@ -2420,9 +2579,12 @@ class SalaryCalculationAPI(APIView):
                 "employee_name": employee.employee_name,
                 "department": employee.employee_department,
                 "employee_type": employee.employee_type,
+                "Fix_Incentive": employee.incentive,
                 "month": month,
                 "year": year,
                 "total_month_days": attendance_data.get('total_days_in_month', 30),
+                "od_days": attendance_data.get('od_days', 0),
+                "od_hours": attendance_data.get('od_hours', 0),
                 "total_working_days": attendance_data.get('total_working_days', 0),
                 "present_days": attendance_data.get('total_present_days', 0),
                 "sundays": attendance_data.get('sundays_in_month', 0),
@@ -2438,7 +2600,6 @@ class SalaryCalculationAPI(APIView):
         
         # End timing and log performance
         processing_time = (datetime.now() - start_time).total_seconds()
-        print(f"Processed {len(results)} salaries in {processing_time} seconds")
         
         return Response({
             "month": month,
@@ -2447,6 +2608,15 @@ class SalaryCalculationAPI(APIView):
             "processing_time_seconds": processing_time,
             "results": results
         })
+    def get_salary_advance(self, employee, month, year):
+        advances = SalaryAdvance.objects.filter(
+            employee=employee,
+            date_issued__year=year,
+            date_issued__month=month
+        ).aggregate(total_advance=Sum('amount'))
+
+        return advances['total_advance'] or 0
+
     
     def calculate_salary(self, employee, attendance_data):
         """
@@ -2468,23 +2638,24 @@ class SalaryCalculationAPI(APIView):
             "incentive": 0,
             "overtime_payment": 0,
             "od_payment": 0,
-            "total_salary": 0
+            "total_salary": 0,
+            "net_salary": 0
         }
         
         if not employee.salary or employee.salary <= 0:
             return salary_components
         
         total_days = int(attendance_data.get('total_days_in_month', 30))
-        present_days = int(float(attendance_data.get('total_present_days', 0)))
-        absent_days = int(float(attendance_data.get('total_absent_days', 0))) 
+        present_days = float(attendance_data.get('total_present_days', 0))
+        absent_days = float(attendance_data.get('total_absent_days', 0))
         sundays = int(attendance_data.get('sundays_in_month', 0))
-        print(f'sunday{sundays}')
-        leave_days = int(float(attendance_data.get('total_leave_days', 0)))
+        leave_days = float(attendance_data.get('total_leave_days', 0))
         per_day_salary = float(employee.salary) / total_days
-        
+        fix_incentive = float(employee.incentive) if employee.incentive else 0
+        per_day_fixincentive = fix_incentive / total_days if total_days else 0
         # Handle CL days - subtract from absent and add to present
         available_cl = employee.no_of_cl  # Total CL available to the employee
-        working_hours = employee.working_hours  # Total CL available to the employee
+        working_hours = float(employee.working_hours)  # Total CL available to the employee
         cl_used = min(available_cl, absent_days)  # Can't use more CL than absent days
         
         # Adjust present and absent days based on CL usage 
@@ -2496,25 +2667,42 @@ class SalaryCalculationAPI(APIView):
         
         # Apply sunday deduction rules based on adjusted absent days
         if eligible_sundays > 0 and adjusted_absent >= 3:
-            if adjusted_absent >= 10:
+            if adjusted_absent >= 9:
                 eligible_sundays = 0
-            elif adjusted_absent >= 6:
+            elif adjusted_absent >= 7:
+                eligible_sundays = max(0, eligible_sundays - 3)
+            elif adjusted_absent >= 5:
                 eligible_sundays = max(0, eligible_sundays - 2)
             else:
                 eligible_sundays = max(0, eligible_sundays - 1)
-        print(adjusted_present)
-        print(eligible_sundays)
-        print(per_day_salary)
-        # Calculate gross salary using adjusted present days and eligible sundays
-        gross_salary = round((adjusted_present + eligible_sundays) * per_day_salary, 2)
-        print(gross_salary)
+        
+        # Calculate gross salary based on monthly/daily salary type
+        if employee.is_monthly_salary:
+            # Monthly salary calculation (divide by total days * present days)
+            per_day_salary = float(employee.salary) / total_days
+            gross_salary = round((adjusted_present + eligible_sundays) * per_day_salary, 2)
+        else:
+            # Daily wage calculation (salary is already per day)
+            gross_salary = round((adjusted_present + eligible_sundays) * float(employee.salary), 2)
+        if employee.employee_id == 'SSB129':
+            print(gross_salary)
+            print(adjusted_present)
+            print(eligible_sundays)
+            print(per_day_salary)
         
         # Calculate salary components
         basic_salary = round(gross_salary / 2, 2)
-        
+        total_fix_incentive = round((adjusted_present + eligible_sundays) * per_day_fixincentive , 2)
         # PF calculation (12% of basic, max 15000)
-        pf_base = min(basic_salary, 15000)
-        pf = round(pf_base * 0.12, 2)
+        Process_total_present_dayes=adjusted_present + eligible_sundays
+        pf = 0
+        if employee.is_getting_pf:
+            pf_base = min(basic_salary, 15000)
+            pf = round(pf_base * 0.12, 2)
+        
+        attdence_bonous=0
+        if employee.employee_department=='CNC' and Process_total_present_dayes==total_days:
+            attdence_bonous=1000
         
         # ESIC calculation (0.75% of gross if salary <= 22500)
         esic = 0
@@ -2533,11 +2721,12 @@ class SalaryCalculationAPI(APIView):
         # Calculate overtime payment if eligible
         overtime_payment = 0
         if employee.is_getting_ot:
-            overtime_hours = attendance_data.get('total_overtime_hours', 0)
-            overtime_hours = float(overtime_hours)  # or int(), if appropriate
+            overtime_hours = float(attendance_data.get('total_overtime_hours', 0))
             if overtime_hours > 0:
-                per_hour_rate = float(employee.salary) / (total_days * float(working_hours))
-
+                if employee.is_monthly_salary:
+                    per_hour_rate = float(employee.salary) / (total_days * working_hours)
+                else:
+                    per_hour_rate = float(employee.salary) / working_hours
                 overtime_payment = round(overtime_hours * per_hour_rate, 2)
         
         # Calculate OD payment
@@ -2546,9 +2735,12 @@ class SalaryCalculationAPI(APIView):
         od_hours = float(attendance_data.get('extra_days', {}).get('od_hours', 0))
 
         if od_days > 0 or od_hours > 0:
-            per_day_rate = float(employee.salary) / total_days
-            per_hour_rate = float(per_day_rate) / float(working_hours)
-
+            if employee.is_monthly_salary:
+                per_day_rate = float(employee.salary) / total_days
+                per_hour_rate = per_day_rate / float(working_hours)
+            else:
+                per_day_rate = float(employee.salary)
+                per_hour_rate = per_day_rate /float(working_hours)
             
             od_payment = round((od_days * per_day_rate) + (od_hours * per_hour_rate), 2)
         
@@ -2556,8 +2748,13 @@ class SalaryCalculationAPI(APIView):
         incentive = round(overtime_payment + od_payment, 2)
         
         # Calculate total salary
-        total_salary = round(gross_salary + incentive - pf - esic, 2)
-        
+        total_salary = round(gross_salary + incentive + total_fix_incentive + attdence_bonous - pf - esic, 2)
+
+        salary_advance = self.get_salary_advance(employee, attendance_data.get('month'), attendance_data.get('year'))
+
+        # Adjust final salary
+        net_salary = round(Decimal(total_salary) - salary_advance, 2)
+
         return {
             "gross_salary": gross_salary,
             "basic_salary": basic_salary,
@@ -2565,11 +2762,68 @@ class SalaryCalculationAPI(APIView):
             "medical_allowance": medical_allowance,
             "conveyance_allowance": conveyance_allowance,
             "pf": pf,
+            "attdence_bonous":attdence_bonous,
             "esic": esic,
             "incentive": incentive,
+            "total_fix_incentive": total_fix_incentive,
             "overtime_payment": overtime_payment,
             "od_payment": od_payment,
             "total_salary": total_salary,
+            "salary_advance": salary_advance,
+            "net_salary": net_salary,
             "cl_used": cl_used,  # Add CL used to the response
             "cl_remaining": available_cl - cl_used  # Add remaining CL to the response
         }
+from .serializers import SalaryAdvanceSerializer, BulkSalaryAdvanceSerializer
+
+class SalaryAdvanceViewSet(viewsets.ModelViewSet):
+    queryset = SalaryAdvance.objects.select_related('employee').all()
+    serializer_class = SalaryAdvanceSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = {
+        'employee__id': ['exact'],
+        'amount': ['exact', 'gte', 'lte'],
+        'date_issued': ['exact', 'gte', 'lte'],
+    }
+    search_fields = ['employee__employee_name', 'reason']
+    ordering_fields = ['date_issued', 'amount', 'created_at']
+    ordering = ['-date_issued']
+
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        serializer = BulkSalaryAdvanceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_bulk_create(serializer)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def perform_bulk_create(self, serializer):
+        salary_advances = [SalaryAdvance(**item) for item in serializer.validated_data]
+        SalaryAdvance.objects.bulk_create(salary_advances)
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        
+        # Convert to DataFrame for easy export
+        df = pd.DataFrame(serializer.data)
+        
+        format = request.query_params.get('format', 'csv')
+        
+        if format == 'csv':
+            output = BytesIO()
+            df.to_csv(output, index=False)
+            output.seek(0)
+            response = Response(output, content_type='text/csv')
+            response['Content-Disposition'] = f'attachment; filename=salary_advances_{datetime.now().date()}.csv'
+        elif format == 'excel':
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            output.seek(0)
+            response = Response(output, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            response['Content-Disposition'] = f'attachment; filename=salary_advances_{datetime.now().date()}.xlsx'
+        else:
+            return Response({"error": "Unsupported export format"}, status=400)
+            
+        return response

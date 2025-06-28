@@ -1,6 +1,6 @@
 from django.contrib import admin
 from simple_history.admin import SimpleHistoryAdmin
-from .models import Employee
+from .models import Employee,EmployeeDocument
 from import_export.admin import ExportMixin, ImportExportModelAdmin
 from import_export import resources
 
@@ -35,7 +35,7 @@ class ODSlipAdmin(SimpleHistoryAdmin):
     search_fields = ('employee__employee_name', 'approved_by')
     list_filter = ('od_date',)
 
-from .models import SundayReplacement
+from .models import SundayReplacement, SalaryAdvance
 
 @admin.register(SundayReplacement)
 class SundayReplacementAdmin(SimpleHistoryAdmin):
@@ -80,3 +80,16 @@ class ProcessedSalaryAdmin(admin.ModelAdmin):
     list_filter = ('month', 'year', 'employee')
     search_fields = ('employee__employee_name',)
     ordering = ('-year', '-month')
+
+
+@admin.register(SalaryAdvance)
+class SalaryAdvanceAdmin(admin.ModelAdmin):
+    list_display = ('employee',  'date_issued')
+    list_filter = ('employee', 'date_issued')
+    search_fields = ('employee__employee_name',)
+
+@admin.register(EmployeeDocument)
+class EmployeeDocumentAdmin(admin.ModelAdmin):
+    list_display = ('employee',  'document_type')
+    list_filter = ('employee', 'document_type')
+    search_fields = ('employee__employee_name',)

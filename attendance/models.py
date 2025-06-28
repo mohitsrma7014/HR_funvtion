@@ -2,6 +2,7 @@ from django.db import models
 from simple_history.models import HistoricalRecords
 from datetime import datetime
 import pytz
+import os
 
 class Employee(models.Model):
     EMPLOYEE_TYPES = (
@@ -76,12 +77,20 @@ class Employee(models.Model):
 
     employee_id = models.CharField(max_length=10, unique=True)
     employee_name = models.CharField(max_length=100)
+    profile_picture = models.ImageField(
+        upload_to='employee_profile_pics/',
+        blank=True,
+        null=True,
+    )
+    
     father_name = models.CharField(max_length=100)
     employee_type = models.CharField(max_length=2, choices=EMPLOYEE_TYPES)
     employee_department = models.CharField(max_length=32, choices=DEPARTMENTS)
     position = models.CharField(max_length=30, choices=POSITION_CHOICES)
     is_getting_sunday = models.BooleanField(default=True)
     is_getting_ot = models.BooleanField(default=False)
+    is_getting_pf = models.BooleanField(default=True)
+    is_monthly_salary = models.BooleanField(default=True)
     no_of_cl = models.PositiveIntegerField(default=0)
     working_time_in = models.TimeField()
     working_time_out = models.TimeField()
@@ -91,12 +100,45 @@ class Employee(models.Model):
     salary = models.DecimalField(max_digits=10, decimal_places=2)
     incentive = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     is_active = models.BooleanField(default=True, help_text="Designates whether the employee is active or inactive")
+
+    joining_date = models.DateField(null=True, blank=True)
+    leaving_date = models.DateField(null=True, blank=True)
     
 
     history = HistoricalRecords()  # <- to track all changes
 
     def __str__(self):
         return f"{self.employee_name} ({self.employee_id})"
+    
+class SalaryAdvance(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='salary_advances')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    date_issued = models.DateField()
+    reason = models.TextField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.employee.employee_name} - {self.amount} on {self.date_issued}"
+
+    class Meta:
+        ordering = ['-date_issued']
+
+class EmployeeDocument(models.Model):    
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='documents')
+    document_type = models.CharField(max_length=40)
+    document_file = models.FileField(
+        upload_to='employee_documents/',
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    description = models.TextField(blank=True)
+    
+    def __str__(self):
+        return f"{self.document_type} - {self.employee.employee_name}"
+    
+    @property
+    def filename(self):
+        return os.path.basename(self.document_file.name)
 
 
 class GatePass(models.Model):
