@@ -1557,7 +1557,7 @@ class ProcessAttendanceAPI(APIView):
                     'status': 'Absent',
                     'remarks': 'Invalid night shift: ' + ', '.join(remarks)
                 })
-                result['total_absent_days'] += Decimal('1.0')
+                result['total_absent_days'] += Decimal('0.0')
         
         elif len(night_shift_punches) == 1 and not day_record['gate_pass']:
             # Single punch case
@@ -1579,7 +1579,7 @@ class ProcessAttendanceAPI(APIView):
                 'status': 'Absent',
                 'remarks': 'No punches recorded for night shift'
             })
-            result['total_absent_days'] += Decimal('1.0')
+            result['total_absent_days'] += Decimal('0.0')
     
     def round_overtime(self, overtime_hours):
         """Round overtime according to company policy"""
@@ -2657,6 +2657,7 @@ class SalaryCalculationAPI(APIView):
         available_cl = employee.no_of_cl  # Total CL available to the employee
         working_hours = float(employee.working_hours)  # Total CL available to the employee
         cl_used = min(available_cl, absent_days)  # Can't use more CL than absent days
+        od_days = int(float(attendance_data.get('extra_days', {}).get('od_days', 0)))
         
         # Adjust present and absent days based on CL usage 
         adjusted_present = present_days + cl_used
@@ -2664,17 +2665,17 @@ class SalaryCalculationAPI(APIView):
         
         # Calculate eligible sundays based on adjusted absent days
         eligible_sundays = sundays if employee.is_getting_sunday else 0
-        
+        if od_days == 0:
         # Apply sunday deduction rules based on adjusted absent days
-        if eligible_sundays > 0 and adjusted_absent >= 3:
-            if adjusted_absent >= 9:
-                eligible_sundays = 0
-            elif adjusted_absent >= 7:
-                eligible_sundays = max(0, eligible_sundays - 3)
-            elif adjusted_absent >= 5:
-                eligible_sundays = max(0, eligible_sundays - 2)
-            else:
-                eligible_sundays = max(0, eligible_sundays - 1)
+            if eligible_sundays > 0 and adjusted_absent >= 3:
+                if adjusted_absent >= 9:
+                    eligible_sundays = 0
+                elif adjusted_absent >= 7:
+                    eligible_sundays = max(0, eligible_sundays - 3)
+                elif adjusted_absent >= 5:
+                    eligible_sundays = max(0, eligible_sundays - 2)
+                else:
+                    eligible_sundays = max(0, eligible_sundays - 1)
         
         # Calculate gross salary based on monthly/daily salary type
         if employee.is_monthly_salary:
