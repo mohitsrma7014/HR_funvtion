@@ -5,7 +5,7 @@ from .views import (
     EmployeeViewSet, GatePassViewSet, ShiftAssignmentViewSet,
     ODSlipViewSet, SundayReplacementViewSet, HolidayViewSet,
     ManualPunchViewSet,EmployeeViewSet1,EmployeeViewSet2,ProcessedAttendanceAPIView,MissedPunchReportAPI,SalaryCalculationAPI,EmployeeDocumentViewSet,SalaryAdvanceViewSet,EmployeeViewSetadvance
-,ActiveEmployeeListAPIView,
+,ActiveEmployeeListAPIView,productionincentiveViewSet,
     EmployeeDocumentListCreateAPIView,EmployeeDocumentRetrieveUpdateDestroyAPIView)
 
 router = DefaultRouter()
@@ -20,6 +20,7 @@ router.register(r'holidays', HolidayViewSet, basename='holiday')
 router.register(r'manualpunches', ManualPunchViewSet, basename='manualpunch')
 router.register(r'employees/(?P<employee_pk>\d+)/documents', EmployeeDocumentViewSet, basename='employee-documents')
 router.register(r'salary-advances', SalaryAdvanceViewSet, basename='salary-advance')
+router.register(r'salary-prduction-incentive', productionincentiveViewSet, basename='salary-prduction-incentive')
 router.register(r'EmployeeViewSetadvance', EmployeeViewSetadvance, basename='EmployeeViewSetadvance')
 
 

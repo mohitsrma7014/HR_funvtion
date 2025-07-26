@@ -72,7 +72,7 @@ class ProcessedAttendanceAdmin(admin.ModelAdmin):
     ordering = ('-processed_date',)
 
 
-from .models import ProcessedSalary
+from .models import ProcessedSalary,ProdctionIncentive
 
 @admin.register(ProcessedSalary)
 class ProcessedSalaryAdmin(admin.ModelAdmin):
@@ -84,6 +84,12 @@ class ProcessedSalaryAdmin(admin.ModelAdmin):
 
 @admin.register(SalaryAdvance)
 class SalaryAdvanceAdmin(admin.ModelAdmin):
+    list_display = ('employee',  'date_issued')
+    list_filter = ('employee', 'date_issued')
+    search_fields = ('employee__employee_name',)
+
+@admin.register(ProdctionIncentive)
+class ProdctionIncentiveAdmin(admin.ModelAdmin):
     list_display = ('employee',  'date_issued')
     list_filter = ('employee', 'date_issued')
     search_fields = ('employee__employee_name',)

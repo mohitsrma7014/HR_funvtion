@@ -124,6 +124,20 @@ class SalaryAdvance(models.Model):
     class Meta:
         ordering = ['-date_issued']
 
+class ProdctionIncentive(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='prodction_incentive')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    date_issued = models.DateField()
+    reason = models.TextField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.employee.employee_name} - {self.amount} on {self.date_issued}"
+
+    class Meta:
+        ordering = ['-date_issued']
+
 class EmployeeDocument(models.Model):    
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='documents')
     document_type = models.CharField(max_length=40)

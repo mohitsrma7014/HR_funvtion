@@ -91,6 +91,7 @@ WSGI_APPLICATION = 'hr.wsgi.application'
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOWED_ORIGINS = [
     "http://192.168.1.199:5173",
+    "http://192.168.1.199:5175",
     "http://192.168.1.199:8002",
     "http://192.168.1.199:3000",
 ]

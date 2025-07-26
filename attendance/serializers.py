@@ -1,7 +1,7 @@
 # serializers.py
 from rest_framework import serializers
 from .models import (
-    Employee, GatePass, ShiftAssignment, 
+    Employee, GatePass, ShiftAssignment, ProdctionIncentive,
     ODSlip, SundayReplacement, Holiday, ManualPunch,EmployeeDocument,SalaryAdvance
 )
 
@@ -92,6 +92,21 @@ class SalaryAdvanceSerializer(serializers.ModelSerializer):
 
 class BulkSalaryAdvanceSerializer(serializers.ListSerializer):
     child = SalaryAdvanceSerializer()
+
+class ProdctionIncentiveSerializer(serializers.ModelSerializer):
+    employee = EmployeeSerializeradvance(read_only=True)
+    employee_id = serializers.PrimaryKeyRelatedField(
+        queryset=Employee.objects.all(),
+        source='employee',
+        write_only=True
+    )
+    
+    class Meta:
+        model = ProdctionIncentive
+        fields = '__all__'
+
+class BulkProdctionIncentiveSerializer(serializers.ListSerializer):
+    child = ProdctionIncentiveSerializer()
 
 class GatePassSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.employee_name', read_only=True)

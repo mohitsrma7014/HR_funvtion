@@ -1049,6 +1049,7 @@ class ProcessAttendanceAPI(APIView):
         self.calculate_summary_statistics(result, start_date, end_date, 
                                         sunday_replacements, employee)
         
+        
         return result
     
     def initialize_attendance_result(self, employee, start_date):
@@ -1195,9 +1196,19 @@ class ProcessAttendanceAPI(APIView):
             'status': status_prefix,
             'remarks': f"OD - {self.format_od_display(od_slip)}"
         })
+        # Only add to present/absent days if it's not a Sunday
+        if day_record['date'].weekday() != 6:  # Not Sunday
+            if od_slip.extra_days > 0:
+                result['total_present_days'] += Decimal(str(od_slip.extra_days))
+                result['total_absent_days'] -= Decimal(str(od_slip.extra_days))
+                result['total_absent_days'] += Decimal('1')
         
-        result['extra_days']['od_days'] += Decimal(str(od_slip.extra_days))
         result['extra_days']['od_hours'] += Decimal(str(od_slip.extra_hours))
+
+        # For Sundays, add the OD days to extra days instead of present days
+        if day_record['date'].weekday() == 6:  # Sunday
+            result['extra_days']['od_days'] += Decimal(str(od_slip.extra_days))
+            
         
         # Update the od_display in result
         od_display = []
@@ -1247,6 +1258,7 @@ class ProcessAttendanceAPI(APIView):
                     'day_value': Decimal('1.0'),
                     'working_hours': employee.working_hours
                 })
+                result['total_present_days'] += Decimal('1')
                 
             elif gate_pass.action_taken == 'HD':
                 day_record.update({
@@ -1267,7 +1279,6 @@ class ProcessAttendanceAPI(APIView):
                 })
                 result['extra_days']['gate_pass_deductions'] += Decimal('1.0')
                 result['total_absent_days'] += Decimal('1.0')
-                result['total_present_days'] -= Decimal('1.0')
                 
             elif gate_pass.action_taken == 'HD_CUT':
                 day_record.update({
@@ -1286,6 +1297,9 @@ class ProcessAttendanceAPI(APIView):
                   emp_punch_logs, emp_manual_punches):
         """Process punches for the day with proper timezone handling"""
         # Get timezone-aware datetime range for the day
+         # ✅ Skip punch processing if FD_CUT gate pass already applied
+        if day_record.get('gate_pass') and day_record['gate_pass'].get('action_taken') == 'FD_CUT':
+            return
         day_start, day_end = self.get_day_range(date, day_record['shift_type'])
         
         # Get all punches for the day (including manual)
@@ -1667,6 +1681,14 @@ class ProcessAttendanceAPI(APIView):
                 )
             }
         })
+        # Adjust if total_present_days exceeds total_working_days
+        if result['total_present_days'] > total_working_days:
+            overflow = result['total_present_days'] - total_working_days
+            result['total_present_days'] = Decimal(str(total_working_days))
+            result['extra_days']['od_days'] += overflow
+        # Ensure total_absent_days is not negative
+        if result['total_absent_days'] < 0:
+            result['total_absent_days'] = Decimal('0.0')
         
     def save_processed_data(self, results, month, year):
         saved_records = []
@@ -1711,7 +1733,7 @@ from rest_framework import viewsets, filters
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import (
     Employee, GatePass, ShiftAssignment, 
-    ODSlip, SundayReplacement, Holiday, ManualPunch
+    ODSlip, SundayReplacement, Holiday, ManualPunch,ProdctionIncentive
 )
 from .serializers import (
     EmployeeSerializer, GatePassSerializer, 
@@ -2616,6 +2638,15 @@ class SalaryCalculationAPI(APIView):
         ).aggregate(total_advance=Sum('amount'))
 
         return advances['total_advance'] or 0
+    
+    def get_prdction_incentive(self, employee, month, year):
+        production_incentive = ProdctionIncentive.objects.filter(
+            employee=employee,
+            date_issued__year=year,
+            date_issued__month=month
+        ).aggregate(total_prdction_incentive=Sum('amount'))
+
+        return production_incentive['total_prdction_incentive'] or 0
 
     
     def calculate_salary(self, employee, attendance_data):
@@ -2752,9 +2783,10 @@ class SalaryCalculationAPI(APIView):
         total_salary = round(gross_salary + incentive + total_fix_incentive + attdence_bonous - pf - esic, 2)
 
         salary_advance = self.get_salary_advance(employee, attendance_data.get('month'), attendance_data.get('year'))
+        total_prdction_incentive = self.get_prdction_incentive(employee, attendance_data.get('month'), attendance_data.get('year'))
 
         # Adjust final salary
-        net_salary = round(Decimal(total_salary) - salary_advance, 2)
+        net_salary = round(Decimal(total_salary) - salary_advance + total_prdction_incentive, 2)
 
         return {
             "gross_salary": gross_salary,
@@ -2771,11 +2803,12 @@ class SalaryCalculationAPI(APIView):
             "od_payment": od_payment,
             "total_salary": total_salary,
             "salary_advance": salary_advance,
+            "total_prdction_incentive": total_prdction_incentive,
             "net_salary": net_salary,
             "cl_used": cl_used,  # Add CL used to the response
             "cl_remaining": available_cl - cl_used  # Add remaining CL to the response
         }
-from .serializers import SalaryAdvanceSerializer, BulkSalaryAdvanceSerializer
+from .serializers import SalaryAdvanceSerializer, BulkSalaryAdvanceSerializer,ProdctionIncentiveSerializer,BulkProdctionIncentiveSerializer
 
 class SalaryAdvanceViewSet(viewsets.ModelViewSet):
     queryset = SalaryAdvance.objects.select_related('employee').all()
@@ -2800,6 +2833,59 @@ class SalaryAdvanceViewSet(viewsets.ModelViewSet):
     def perform_bulk_create(self, serializer):
         salary_advances = [SalaryAdvance(**item) for item in serializer.validated_data]
         SalaryAdvance.objects.bulk_create(salary_advances)
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        
+        # Convert to DataFrame for easy export
+        df = pd.DataFrame(serializer.data)
+        
+        format = request.query_params.get('format', 'csv')
+        
+        if format == 'csv':
+            output = BytesIO()
+            df.to_csv(output, index=False)
+            output.seek(0)
+            response = Response(output, content_type='text/csv')
+            response['Content-Disposition'] = f'attachment; filename=salary_advances_{datetime.now().date()}.csv'
+        elif format == 'excel':
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            output.seek(0)
+            response = Response(output, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            response['Content-Disposition'] = f'attachment; filename=salary_advances_{datetime.now().date()}.xlsx'
+        else:
+            return Response({"error": "Unsupported export format"}, status=400)
+            
+        return response
+    
+
+class productionincentiveViewSet(viewsets.ModelViewSet):
+    queryset = ProdctionIncentive.objects.select_related('employee').all()
+    serializer_class = ProdctionIncentiveSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = {
+        'employee__id': ['exact'],
+        'amount': ['exact', 'gte', 'lte'],
+        'date_issued': ['exact', 'gte', 'lte'],
+    }
+    search_fields = ['employee__employee_name', 'reason']
+    ordering_fields = ['date_issued', 'amount', 'created_at']
+    ordering = ['-date_issued']
+
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        serializer = BulkProdctionIncentiveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_bulk_create(serializer)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def perform_bulk_create(self, serializer):
+        salary_advances = [ProdctionIncentive(**item) for item in serializer.validated_data]
+        ProdctionIncentive.objects.bulk_create(salary_advances)
 
     @action(detail=False, methods=['get'])
     def export(self, request):
