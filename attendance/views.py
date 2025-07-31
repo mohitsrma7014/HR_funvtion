@@ -1193,7 +1193,6 @@ class ProcessAttendanceAPI(APIView):
             'is_od': True,
             'od_hours': od_slip.extra_hours,
             'od_days': od_slip.extra_days,
-            'status': status_prefix,
             'remarks': f"OD - {self.format_od_display(od_slip)}"
         })
         # Only add to present/absent days if it's not a Sunday
@@ -1258,7 +1257,8 @@ class ProcessAttendanceAPI(APIView):
                     'day_value': Decimal('1.0'),
                     'working_hours': employee.working_hours
                 })
-                result['total_present_days'] += Decimal('1')
+                # Explicitly add to present days
+                result['total_present_days'] += Decimal('1.0')
                 
             elif gate_pass.action_taken == 'HD':
                 day_record.update({
@@ -1298,7 +1298,8 @@ class ProcessAttendanceAPI(APIView):
         """Process punches for the day with proper timezone handling"""
         # Get timezone-aware datetime range for the day
          # ✅ Skip punch processing if FD_CUT gate pass already applied
-        if day_record.get('gate_pass') and day_record['gate_pass'].get('action_taken') == 'FD_CUT':
+        if day_record.get('gate_pass') and day_record['gate_pass'].get('action_taken') in ['FD', 'FD_CUT']:
+            # For full day gate passes, we don't need to process punches
             return
         day_start, day_end = self.get_day_range(date, day_record['shift_type'])
         
@@ -2756,9 +2757,9 @@ class SalaryCalculationAPI(APIView):
             overtime_hours = float(attendance_data.get('total_overtime_hours', 0))
             if overtime_hours > 0:
                 if employee.is_monthly_salary:
-                    per_hour_rate = float(employee.salary) / (total_days * working_hours)
+                    per_hour_rate = float(employee.salary) / (total_days * (working_hours))
                 else:
-                    per_hour_rate = float(employee.salary) / working_hours
+                    per_hour_rate = float(employee.salary) / (working_hours)
                 overtime_payment = round(overtime_hours * per_hour_rate, 2)
         
         # Calculate OD payment
@@ -2769,10 +2770,10 @@ class SalaryCalculationAPI(APIView):
         if od_days > 0 or od_hours > 0:
             if employee.is_monthly_salary:
                 per_day_rate = float(employee.salary) / total_days
-                per_hour_rate = per_day_rate / float(working_hours)
+                per_hour_rate = per_day_rate / float((working_hours))
             else:
                 per_day_rate = float(employee.salary)
-                per_hour_rate = per_day_rate /float(working_hours)
+                per_hour_rate = per_day_rate /float((working_hours))
             
             od_payment = round((od_days * per_day_rate) + (od_hours * per_hour_rate), 2)
         
