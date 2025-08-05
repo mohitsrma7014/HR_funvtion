@@ -1267,7 +1267,7 @@ class ProcessAttendanceAPI(APIView):
                     'day_value': Decimal('0.5'),
                     'is_half_day': True
                 })
-                result['total_present_days'] -= Decimal('0.5')
+                result['total_present_days'] += Decimal('0.5')
                 result['total_absent_days'] += Decimal('0.5')
                 result['total_half_days'] += Decimal('0.5')
                 
@@ -1298,7 +1298,7 @@ class ProcessAttendanceAPI(APIView):
         """Process punches for the day with proper timezone handling"""
         # Get timezone-aware datetime range for the day
          # ✅ Skip punch processing if FD_CUT gate pass already applied
-        if day_record.get('gate_pass') and day_record['gate_pass'].get('action_taken') in ['FD', 'FD_CUT']:
+        if day_record.get('gate_pass') and day_record['gate_pass'].get('action_taken') in ['FD', 'FD_CUT','HD']:
             # For full day gate passes, we don't need to process punches
             return
         day_start, day_end = self.get_day_range(date, day_record['shift_type'])
@@ -1674,6 +1674,7 @@ class ProcessAttendanceAPI(APIView):
             'total_days_in_month': total_days_in_month,
             'sundays_in_month': sundays_in_month,
             'total_working_days': total_working_days,
+            'total_absent_days': total_working_days - result['total_present_days'],
             'extra_days': {
                 **result['extra_days'],
                 'total': (
