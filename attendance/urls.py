@@ -1,4 +1,4 @@
-from .views import ProcessAttendanceAPI
+from .views import ProcessAttendanceAPI,ProcessDailyAttendanceAPI
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
@@ -29,6 +29,7 @@ urlpatterns = [
     # Your other URLs here...
     # URL for ProcessAttendanceAPI
     path('api/attendance/process/', ProcessAttendanceAPI.as_view(), name='process-attendance'),
+    path('api/attendance/ProcessDailyAttendance/', ProcessDailyAttendanceAPI.as_view(), name='process-daily-attendance'),
     path('', include(router.urls)),
     path('save/attendancesave/', ProcessedAttendanceAPIView.as_view(), name='processed-attendance'),
     path('misspunch/', MissedPunchReportAPI.as_view(), name='MissedPunch-ReportAPI'),

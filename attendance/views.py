@@ -2916,3 +2916,756 @@ class productionincentiveViewSet(viewsets.ModelViewSet):
             return Response({"error": "Unsupported export format"}, status=400)
             
         return response
+    
+
+
+class ProcessDailyAttendanceAPI(APIView):
+    # Define timezone constants
+    IST = pytz.timezone('Asia/Kolkata')
+    UTC = pytz.UTC
+    
+    def post(self, request):
+        # Step 1: Validate input parameters
+        date_str = request.data.get('date')
+        save_data = request.data.get('save', False)
+        
+        if not date_str:
+            return Response(
+                {"error": "Date is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            process_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Step 2: Get date range for processing (single day)
+        start_date = process_date
+        end_date = process_date + timedelta(days=1)
+        
+        # Step 3: Fetch all relevant data in bulk for performance
+        employees = Employee.objects.all()
+        data = self.fetch_attendance_data(employees, start_date, end_date)
+        
+        # Step 4: Process attendance for each employee
+        results = []
+        for employee in employees:
+            employee_data = self.process_employee_attendance(
+                employee,
+                start_date,
+                end_date,
+                **data
+            )
+            results.append(employee_data)
+        
+        # Step 5: Save data if requested
+        if save_data:
+            self.save_processed_data(results, process_date)
+        
+        return Response(results, status=status.HTTP_200_OK)
+    
+    def fetch_attendance_data(self, employees, start_date, end_date):
+        """Fetch all required data in bulk for performance"""
+        # Convert dates to timezone-aware datetimes for queries
+        tz_start = django_timezone.make_aware(datetime.combine(start_date, time.min))
+        tz_end = django_timezone.make_aware(datetime.combine(end_date, time.min))
+        
+        departments = [emp.employee_department for emp in employees]
+        employee_ids = [emp.id for emp in employees]
+        
+        return {
+            'gate_passes': GatePass.objects.filter(
+                employee_id__in=employee_ids,
+                date=start_date  # Only for the specific date
+            ).select_related('employee'),
+            
+            'shift_assignments': ShiftAssignment.objects.filter(
+                employee_id__in=employee_ids,
+                start_date__lte=start_date,
+                end_date__gte=start_date
+            ).select_related('employee'),
+            
+            'od_slips': ODSlip.objects.filter(
+                employee_id__in=employee_ids,
+                od_date=start_date  # Only for the specific date
+            ).select_related('employee'),
+            
+            'sunday_replacements': SundayReplacement.objects.filter(
+                Q(department__isnull=True) | Q(department__in=departments),
+                sunday_date=start_date  # Only for the specific date
+            ),
+            
+            'holidays': Holiday.objects.filter(
+                Q(department__isnull=True) | Q(department__in=departments),
+                holiday_date=start_date  # Only for the specific date
+            ),
+            
+            'manual_punches': ManualPunch.objects.filter(
+                employee_id__in=employee_ids
+            ).filter(
+                Q(punch_in_time__gte=tz_start, punch_in_time__lt=tz_end) |
+                Q(punch_out_time__gte=tz_start, punch_out_time__lt=tz_end)
+            ).select_related('employee'),
+            
+            'punch_logs': self.fetch_punch_logs(start_date, end_date)
+        }
+    
+    def fetch_punch_logs(self, start_date, end_date):
+        """Fetch punch logs from all biometric machines with proper timezone handling"""
+        machines = [
+            {'serial': 'CRJP232260279', 'username': 'Api', 'password': 'Api@123#$'},
+            {'serial': 'CRJP224060053', 'username': 'Api', 'password': 'Api@123#$'},
+        ]
+        
+        all_logs = []
+        
+        for machine in machines:
+            try:
+                url = "http://ampletrail.com/ssbforge/iclock/WebAPIService.asmx?op=GetTransactionsLog"
+                headers = {
+                    'Content-Type': 'text/xml; charset=utf-8',
+                    'SOAPAction': 'http://tempuri.org/GetTransactionsLog',
+                    'API-Key': '11'
+                }
+                
+                xml_body = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <GetTransactionsLog xmlns="http://tempuri.org/">
+      <FromDateTime>{start_date.strftime('%Y-%m-%dT%H:%M:%S')}</FromDateTime>
+      <ToDateTime>{end_date.strftime('%Y-%m-%dT%H:%M:%S')}</ToDateTime>
+      <SerialNumber>{machine['serial']}</SerialNumber>
+      <UserName>{machine['username']}</UserName>
+      <UserPassword>{machine['password']}</UserPassword>
+      <strDataList></strDataList>
+    </GetTransactionsLog>
+  </soap:Body>
+</soap:Envelope>"""
+                
+                response = requests.post(url, headers=headers, data=xml_body)
+                response.raise_for_status()
+                logs = self.parse_punch_logs_response(response.text)
+                all_logs.extend(logs)
+                
+            except Exception as e:
+                print(f"Error fetching logs from machine {machine['serial']}: {str(e)}")
+                continue
+        
+        all_logs.sort(key=lambda x: x['datetime'])
+        return all_logs
+    
+    def parse_punch_logs_response(self, xml_response):
+        """Parse punch logs response with proper timezone handling"""
+        logs = []
+        lines = xml_response.split('\n')
+        
+        for line in lines:
+            if '\t' in line:
+                parts = line.strip().split('\t')
+                if len(parts) >= 2:
+                    try:
+                        emp_id = parts[0]
+                        datetime_str = parts[1]
+                        
+                        # Parse naive datetime and make it timezone-aware (IST)
+                        naive_dt = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+                        aware_dt = self.IST.localize(naive_dt)
+                        
+                        # Convert to UTC for consistent storage
+                        utc_dt = aware_dt.astimezone(self.UTC)
+                        
+                        logs.append({
+                            'employee_id': emp_id,
+                            'datetime': utc_dt,
+                            'original_time': aware_dt  # Keep original IST time for display
+                        })
+                    except ValueError:
+                        continue
+        return logs
+    
+    def process_employee_attendance(self, employee, start_date, end_date, 
+                                  gate_passes, shift_assignments, od_slips, 
+                                  sunday_replacements, holidays, manual_punches, punch_logs):
+        """Process attendance for a single employee for a specific date"""
+        # Initialize result structure
+        result = self.initialize_attendance_result(employee, start_date)
+        
+        date = start_date
+        
+        # Filter employee-specific data
+        emp_gate_passes = [gp for gp in gate_passes if gp.employee_id == employee.id]
+        emp_od_slips = [od for od in od_slips if od.employee_id == employee.id]
+        emp_manual_punches = [mp for mp in manual_punches if mp.employee_id == employee.id]
+        emp_punch_logs = [log for log in punch_logs if log['employee_id'] == employee.employee_id]
+        
+        # Process the specific date
+        day_record = self.initialize_day_record(employee, date)
+        
+        # Apply shift assignments if rotational
+        self.apply_shift_assignments(day_record, employee, date, shift_assignments)
+        
+        # Check for holidays and Sundays
+        if self.process_special_days(day_record, result, employee, date, 
+                                    holidays, sunday_replacements, emp_od_slips):
+            result['daily_attendance'].append(day_record)
+            return result
+        
+        # Process OD slips
+        self.process_od_slips(day_record, result, date, emp_od_slips)
+        
+        # Process gate passes
+        self.process_gate_passes(day_record, result, date, emp_gate_passes, employee)
+        
+        # Process punches
+        self.process_punches(day_record, result, employee, date, 
+                           emp_punch_logs, emp_manual_punches)
+        
+        result['daily_attendance'].append(day_record)
+        
+        # Calculate summary statistics for the single day
+        self.calculate_summary_statistics(result, start_date, end_date, 
+                                        sunday_replacements, employee)
+        
+        return result
+    
+    def initialize_attendance_result(self, employee, date):
+        """Initialize the result structure for an employee for a single day"""
+        return {
+            'employee_id': employee.employee_id,
+            'employee_name': employee.employee_name,
+            'department': employee.employee_department,
+            'employee_type': employee.employee_type,
+            'shift_type': employee.shift_type,
+            'date': date,
+            'daily_attendance': [],
+            'total_days_in_period': 1,
+            'total_working_days': 0,
+            'total_present_days': Decimal('0.0'),
+            'total_absent_days': Decimal('0.0'),
+            'total_leave_days': 0,
+            'is_sunday': date.weekday() == 6,
+            'gets_sundays_off': employee.is_getting_sunday,
+            'is_holiday': False,
+            'extra_days': {
+                'od_display': '',
+                'od_days': Decimal('0.0'),
+                'od_hours': Decimal('0.0'),
+                'gate_pass_deductions': Decimal('0.0'),
+                'total': Decimal('0.0')
+            },
+            'total_working_hours': Decimal('0.0'),
+            'total_overtime_hours': Decimal('0.0'),
+            'od_slips': [],
+            'total_half_days': Decimal('0.0')
+        }
+    
+    def initialize_day_record(self, employee, date):
+        """Initialize a day record structure"""
+        return {
+            'date': date,
+            'day_type': 'Working Day',
+            'shift_type': employee.shift_type,
+            'scheduled_in': employee.working_time_in,
+            'scheduled_out': employee.working_time_out,
+            'actual_in': None,
+            'actual_out': None,
+            'is_manual_in': False,
+            'is_manual_out': False,
+            'manual_reason': None,
+            'status': 'Absent',
+            'working_hours': Decimal('0.0'),
+            'overtime_hours': Decimal('0.0'),
+            'gate_pass': None,
+            'is_holiday': False,
+            'holiday_name': None,
+            'is_sunday_replaced': False,
+            'replacement_date': None,
+            'is_od': False,
+            'od_hours': Decimal('0.0'),
+            'od_days': Decimal('0.0'),
+            'remarks': '',
+            'night_shift_valid': None,
+            'is_half_day': False,
+            'day_value': Decimal('0.0'),
+        }
+    
+    def apply_shift_assignments(self, day_record, employee, date, shift_assignments):
+        """Apply shift assignments if employee is on rotational shift"""
+        if employee.shift_type == 'ROT':
+            assignment = next((sa for sa in shift_assignments 
+                            if sa.employee_id == employee.id and 
+                            sa.start_date <= date <= sa.end_date), None)
+            if assignment:
+                day_record['shift_type'] = assignment.shift_type
+                day_record['scheduled_in'] = assignment.working_time_in
+                day_record['scheduled_out'] = assignment.working_time_out
+        else:
+            # For non-rotational shifts, use employee defaults
+            day_record['scheduled_in'] = employee.working_time_in
+            day_record['scheduled_out'] = employee.working_time_out
+    
+    def process_special_days(self, day_record, result, employee, date, 
+                           holidays, sunday_replacements, emp_od_slips):
+        """Process holidays and Sundays, returns True if day is special"""
+        # Check for holidays
+        dept_holidays = [h for h in holidays 
+                        if (h.department is None or h.department == employee.employee_department) 
+                        and h.holiday_date == date]
+        if dept_holidays:
+            day_record.update({
+                'is_holiday': True,
+                'holiday_name': dept_holidays[0].holiday_name,
+                'day_type': 'Holiday',
+                'status': 'Holiday'
+            })
+            result['is_holiday'] = True
+            return True
+        
+        # Check for Sundays
+        if date.weekday() == 6:  # Sunday
+            replacement = next((sr for sr in sunday_replacements 
+                             if (sr.department is None or sr.department == employee.employee_department) 
+                             and sr.sunday_date == date), None)
+            
+            if replacement:
+                day_record.update({
+                    'is_sunday_replaced': True,
+                    'replacement_date': replacement.replacement_date,
+                    'day_type': 'Sunday Replacement',
+                    'status': 'Working on Replacement Day'
+                })
+            elif employee.is_getting_sunday:
+                od_slip = next((od for od in emp_od_slips if od.od_date == date), None)
+                if od_slip:
+                    self.process_od_slip(day_record, result, od_slip, 'On Duty (Sunday)')
+                else:
+                    day_record.update({
+                        'day_type': 'Sunday',
+                        'status': 'Sunday'
+                    })
+                return True
+            else:
+                day_record['day_type'] = 'Working Day'
+        
+        return False
+    
+    def process_od_slips(self, day_record, result, date, emp_od_slips):
+        """Process OD slips for the day"""
+        od_slip = next((od for od in emp_od_slips if od.od_date == date), None)
+        if od_slip:
+            self.process_od_slip(day_record, result, od_slip, 'On Duty')
+    
+    def process_od_slip(self, day_record, result, od_slip, status_prefix):
+        """Process a single OD slip"""
+        day_record.update({
+            'is_od': True,
+            'od_hours': od_slip.extra_hours,
+            'od_days': od_slip.extra_days,
+            'remarks': f"OD - {self.format_od_display(od_slip)}"
+        })
+        
+        if day_record['date'].weekday() != 6:  # Not Sunday
+            if od_slip.extra_days > 0:
+                result['total_present_days'] += Decimal(str(od_slip.extra_days))
+                result['total_absent_days'] -= Decimal(str(od_slip.extra_days))
+                result['total_absent_days'] += Decimal('1')
+        
+        result['extra_days']['od_hours'] += Decimal(str(od_slip.extra_hours))
+
+        if day_record['date'].weekday() == 6:  # Sunday
+            result['extra_days']['od_days'] += Decimal(str(od_slip.extra_days))
+            
+        od_display = []
+        if od_slip.extra_days:
+            od_display.append(f"{int(od_slip.extra_days)}d")
+        if od_slip.extra_hours:
+            od_display.append(f"{int(od_slip.extra_hours)}h")
+        
+        if od_display:
+            if result['extra_days']['od_display']:
+                result['extra_days']['od_display'] += " + " + ' '.join(od_display)
+            else:
+                result['extra_days']['od_display'] = ' '.join(od_display)
+        
+        result['od_slips'].append({
+            'date': od_slip.od_date,
+            'hours': od_slip.extra_hours,
+            'days': od_slip.extra_days,
+            'reason': od_slip.reason,
+            'approved_by': od_slip.approved_by
+        })
+    
+    def format_od_display(self, od_slip):
+        """Format OD display string"""
+        parts = []
+        if od_slip.extra_days:
+            parts.append(f"{int(od_slip.extra_days)}d")
+        if od_slip.extra_hours:
+            parts.append(f"{int(od_slip.extra_hours)}h")
+        return ' '.join(parts) if parts else ''
+    
+    def process_gate_passes(self, day_record, result, date, emp_gate_passes, employee):
+        """Process gate passes for the day"""
+        gate_pass = next((gp for gp in emp_gate_passes if gp.date == date), None)
+        if gate_pass:
+            day_record['gate_pass'] = {
+                'date': gp.date,
+                'out_time': gp.out_time,
+                'approved_by': gp.approved_by,
+                'action_taken': gp.action_taken,
+                'reason': gp.reason
+            }
+            
+            if gate_pass.action_taken == 'FD':
+                day_record.update({
+                    'status': 'Present (Full Day Gate Pass)',
+                    'day_value': Decimal('1.0'),
+                    'working_hours': employee.working_hours
+                })
+                result['total_present_days'] += Decimal('1.0')
+                
+            elif gate_pass.action_taken == 'HD':
+                day_record.update({
+                    'status': 'Half Day (Gate Pass)',
+                    'working_hours': employee.working_hours / 2,
+                    'day_value': Decimal('0.5'),
+                    'is_half_day': True
+                })
+                result['total_present_days'] += Decimal('0.5')
+                result['total_absent_days'] += Decimal('0.5')
+                result['total_half_days'] += Decimal('0.5')
+                
+            elif gate_pass.action_taken == 'FD_CUT':
+                day_record.update({
+                    'status': 'Absent (Full Day Cut Gate Pass)',
+                    'day_value': Decimal('0.0'),
+                    'remarks': f'Gate Pass - Full Day Cut (-1 day) - {gate_pass.reason}'
+                })
+                result['extra_days']['gate_pass_deductions'] += Decimal('1.0')
+                result['total_absent_days'] += Decimal('1.0')
+                
+            elif gate_pass.action_taken == 'HD_CUT':
+                day_record.update({
+                    'status': 'Half Day (Gate Pass Cut)',
+                    'working_hours': employee.working_hours / 2,
+                    'day_value': Decimal('0.5'),
+                    'remarks': f'Gate Pass - Half Day Cut (-0.5 day) - {gate_pass.reason}',
+                    'is_half_day': True
+                })
+                result['extra_days']['gate_pass_deductions'] += Decimal('0.5')
+                result['total_present_days'] += Decimal('0.5')
+                result['total_absent_days'] += Decimal('0.5')
+                result['total_half_days'] += Decimal('0.5')
+    
+    def process_punches(self, day_record, result, employee, date, 
+                  emp_punch_logs, emp_manual_punches):
+        """Process punches for the day with proper timezone handling"""
+        if day_record.get('gate_pass') and day_record['gate_pass'].get('action_taken') in ['FD', 'FD_CUT','HD']:
+            return
+            
+        day_start, day_end = self.get_day_range(date, day_record['shift_type'])
+        
+        day_punches = self.get_day_punches(
+            date, day_record['shift_type'], 
+            emp_punch_logs, emp_manual_punches
+        )
+        
+        if day_punches:
+            in_punch = day_punches[0]['datetime'].astimezone(self.IST)
+            day_record['actual_in'] = in_punch.time()
+            day_record['is_manual_in'] = day_punches[0].get('is_manual', False)
+            
+            if len(day_punches) > 1:
+                out_punch = day_punches[-1]['datetime'].astimezone(self.IST)
+                day_record['actual_out'] = out_punch.time()
+                day_record['is_manual_out'] = day_punches[-1].get('is_manual', False)
+        
+        if day_record['status'] in ['On Duty', 'On Duty (Sunday)']:
+            if 'actual_in' in day_record and 'actual_out' in day_record:
+                day_record['status'] = 'Present'
+            else:
+                return
+        
+        if day_record['shift_type'] in ['DAY', 'ROT']:
+            self.process_day_shift(day_record, result, employee, date, day_punches)
+        elif day_record['shift_type'] == 'NIGHT':
+            self.process_night_shift(day_record, result, employee, date, day_punches)
+        
+        self.update_day_value(day_record, result)
+    
+    def get_day_range(self, date, shift_type):
+        """Get timezone-aware datetime range for the day based on shift type"""
+        day_start = self.IST.localize(datetime.combine(date, time.min))
+        day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time.min))
+        
+        if shift_type == 'NIGHT':
+            day_end = self.IST.localize(datetime.combine(date + timedelta(days=2), time.min))
+        
+        return day_start.astimezone(self.UTC), day_end.astimezone(self.UTC)
+    
+    def get_day_punches(self, date, shift_type, emp_punch_logs, emp_manual_punches):
+        """Get all punches for the day including manual punches"""
+        if shift_type == 'NIGHT':
+            day_start = self.IST.localize(datetime.combine(date, time(16, 0)))
+            day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time(10, 0)))
+        else:
+            day_start = self.IST.localize(datetime.combine(date, time.min))
+            day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time.min))
+        
+        day_start = day_start.astimezone(self.UTC)
+        day_end = day_end.astimezone(self.UTC)
+
+        day_punches = [
+            log for log in emp_punch_logs 
+            if day_start <= log['datetime'] < day_end
+        ]
+
+        for mp in emp_manual_punches:
+            if mp.punch_in_time:
+                punch_time_in = mp.punch_in_time.astimezone(self.UTC)
+                if day_start <= punch_time_in < day_end:
+                    day_punches.append({
+                        'employee_id': mp.employee.employee_id,
+                        'datetime': punch_time_in,
+                        'is_manual': True,
+                        'is_in_punch': True,
+                        'reason': mp.reason
+                    })
+
+            if mp.punch_out_time:
+                punch_time_out = mp.punch_out_time.astimezone(self.UTC)
+                if day_start <= punch_time_out < day_end:
+                    day_punches.append({
+                        'employee_id': mp.employee.employee_id,
+                        'datetime': punch_time_out,
+                        'is_manual': True,
+                        'is_in_punch': False,
+                        'reason': mp.reason
+                    })
+
+        day_punches.sort(key=lambda x: x['datetime'])
+        return day_punches
+    
+    def process_day_shift(self, day_record, result, employee, date, day_punches):
+        is_sunday_without_off = (date.weekday() == 6 and not employee.is_getting_sunday)
+        
+        if len(day_punches) >= 2:
+            in_punch = day_punches[0]['datetime'].astimezone(self.IST)
+            out_punch = day_punches[-1]['datetime'].astimezone(self.IST)
+            
+            day_record.update({
+                'actual_in': in_punch.time(),
+                'actual_out': out_punch.time(),
+                'status': 'Present',
+                'is_manual_in': day_punches[0].get('is_manual', False),
+                'is_manual_out': day_punches[-1].get('is_manual', False),
+                'manual_reason': day_punches[0].get('reason') or day_punches[-1].get('reason')
+            })
+            
+            worked_hours = (out_punch - in_punch).total_seconds() / 3600
+            day_record['working_hours'] = Decimal(str(round(worked_hours, 2)))
+            
+            if out_punch.time() < time(16, 0) and not day_record['gate_pass']:
+                day_record.update({
+                    'status': 'Half Day (Early Departure)',
+                    'working_hours': Decimal(str(round(worked_hours/2, 2))),
+                    'remarks': 'Left before 4 PM without gate pass',
+                    'is_half_day': True
+                })
+                result['total_present_days'] += Decimal('0.5')
+                result['total_half_days'] += Decimal('0.5')
+            else:
+                result['total_present_days'] += Decimal('1.0')
+            
+            if employee.is_getting_ot and not day_record['is_od']:
+                scheduled_out = datetime.combine(date, day_record['scheduled_out'])
+                scheduled_out_dt = self.IST.localize(scheduled_out).astimezone(self.UTC)
+                
+                if out_punch.astimezone(self.UTC) > scheduled_out_dt:
+                    overtime = (out_punch.astimezone(self.UTC) - scheduled_out_dt).total_seconds() / 3600
+                    rounded_overtime = self.round_overtime(overtime)
+                    final_ot = max(Decimal('0.0'), rounded_overtime - Decimal('0.5'))
+                    day_record['overtime_hours'] = final_ot
+                    result['total_overtime_hours'] += final_ot
+        
+        elif len(day_punches) == 1 and not day_record['gate_pass']:
+            punch_time = day_punches[0]['datetime'].astimezone(self.IST).time()
+            if is_sunday_without_off:
+                day_record.update({
+                    'status': 'Absent',
+                    'remarks': 'Single punch on Sunday (no Sunday off)',
+                    'working_hours': Decimal('0.0'),
+                    'day_value': Decimal('0.0')
+                })
+            else:
+                day_record.update({
+                    'actual_in': punch_time,
+                    'status': 'Half Day (Single Punch)',
+                    'remarks': 'Only one punch recorded without gate pass',
+                    'working_hours': employee.working_hours / 2,
+                    'is_half_day': True,
+                    'is_manual_in': day_punches[0].get('is_manual', False),
+                    'manual_reason': day_punches[0].get('reason')
+                })
+                result['total_present_days'] += Decimal('0.5')
+                result['total_half_days'] += Decimal('0.5')
+    
+    def process_night_shift(self, day_record, result, employee, date, day_punches):
+        current_day_start = self.IST.localize(datetime.combine(date, time(16, 0)))
+        next_day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time(10, 0)))
+        
+        night_shift_punches = [
+            punch for punch in day_punches
+            if current_day_start <= punch['datetime'].astimezone(self.IST) <= next_day_end
+        ]
+        
+        night_shift_punches.sort(key=lambda x: x['datetime'])
+        
+        if len(night_shift_punches) >= 2:
+            in_punch = night_shift_punches[0]['datetime'].astimezone(self.IST)
+            out_punch = night_shift_punches[-1]['datetime'].astimezone(self.IST)
+            
+            is_valid = True
+            remarks = []
+            
+            if in_punch.time() < time(16, 0):
+                is_valid = False
+                remarks.append("In punch before 4PM")
+            
+            if out_punch.time() > time(10, 0):
+                is_valid = False
+                remarks.append("Out punch after 10AM")
+            
+            duration_hours = (out_punch - in_punch).total_seconds() / 3600
+            if duration_hours < 6:
+                is_valid = False
+                remarks.append(f"Duration less than 6 hours ({duration_hours:.1f}h)")
+            
+            day_record['night_shift_valid'] = is_valid
+            
+            if is_valid:
+                day_record.update({
+                    'actual_in': in_punch.time(),
+                    'actual_out': out_punch.time(),
+                    'status': 'Present',
+                    'is_manual_in': night_shift_punches[0].get('is_manual', False),
+                    'is_manual_out': night_shift_punches[-1].get('is_manual', False),
+                    'manual_reason': night_shift_punches[0].get('reason') or night_shift_punches[-1].get('reason'),
+                    'working_hours': Decimal(str(round(duration_hours, 2)))
+                })
+                
+                if duration_hours >= 8 or day_record.get('gate_pass'):
+                    result['total_present_days'] += Decimal('1.0')
+                else:
+                    day_record.update({
+                        'status': 'Half Day (Short Duration)',
+                        'is_half_day': True,
+                        'remarks': 'Worked less than 8 hours without gate pass'
+                    })
+                    result['total_present_days'] += Decimal('0.5')
+                    result['total_half_days'] += Decimal('0.5')
+                
+                if employee.is_getting_ot and not day_record['is_od']:
+                    scheduled_out = datetime.combine(date + timedelta(days=1), time(4, 0))
+                    scheduled_out_dt = self.IST.localize(scheduled_out).astimezone(self.UTC)
+                    
+                    if out_punch.astimezone(self.UTC) > scheduled_out_dt:
+                        overtime = (out_punch.astimezone(self.UTC) - scheduled_out_dt).total_seconds() / 3600
+                        rounded_overtime = self.round_overtime(overtime)
+                        day_record['overtime_hours'] = rounded_overtime
+                        result['total_overtime_hours'] += rounded_overtime
+            else:
+                day_record.update({
+                    'status': 'Absent',
+                    'remarks': 'Invalid night shift: ' + ', '.join(remarks)
+                })
+                result['total_absent_days'] += Decimal('0.0')
+        
+        elif len(night_shift_punches) == 1 and not day_record['gate_pass']:
+            punch_time = night_shift_punches[0]['datetime'].astimezone(self.IST).time()
+            day_record.update({
+                'actual_in' if punch_time >= time(16, 0) else 'actual_out': punch_time,
+                'status': 'Half Day (Single Punch)',
+                'remarks': 'Only one punch recorded without gate pass',
+                'working_hours': employee.working_hours / 2,
+                'is_half_day': True,
+                'is_manual_in': night_shift_punches[0].get('is_manual', False),
+                'manual_reason': night_shift_punches[0].get('reason')
+            })
+            result['total_present_days'] += Decimal('0.5')
+            result['total_half_days'] += Decimal('0.5')
+        
+        elif not day_record['gate_pass'] and day_record['status'] not in ['On Duty', 'On Duty (Sunday)']:
+            day_record.update({
+                'status': 'Absent',
+                'remarks': 'No punches recorded for night shift'
+            })
+            result['total_absent_days'] += Decimal('0.0')
+    
+    def round_overtime(self, overtime_hours):
+        """Round overtime according to company policy"""
+        if overtime_hours <= 0:
+            return Decimal('0.0')
+
+        whole_hours = int(overtime_hours)
+        remaining_minutes = (overtime_hours - whole_hours) * 60
+
+        if remaining_minutes <= 15:
+            extra = Decimal('0.0')
+        elif remaining_minutes <= 40:
+            extra = Decimal('0.5')
+        else:
+            extra = Decimal('1.0')
+
+        total_rounded = Decimal(whole_hours) + extra
+        return min(total_rounded, Decimal('4.0'))
+    
+    def update_day_value(self, day_record, result):
+        """Update day value based on status"""
+        if day_record.get('gate_pass'):
+            return
+            
+        if day_record['status'] == 'Present':
+            day_record['day_value'] = Decimal('1.0')
+        elif day_record['status'].startswith('Half Day'):
+            day_record['day_value'] = Decimal('0.5')
+            result['total_absent_days'] += Decimal('0.5')
+            result['total_half_days'] += Decimal('0.5')
+        elif day_record['status'] == 'Absent':
+            day_record['day_value'] = Decimal('0.0')
+            result['total_absent_days'] += Decimal('1.0')
+    
+    def calculate_summary_statistics(self, result, start_date, end_date, 
+                               sunday_replacements, employee):
+        """Calculate summary statistics for the single day"""
+        is_holiday = result['is_holiday']
+        is_sunday = result['is_sunday']
+        gets_sundays_off = result['gets_sundays_off']
+        
+        if is_holiday:
+            result['total_working_days'] = 0
+        elif is_sunday and gets_sundays_off:
+            result['total_working_days'] = 0
+        else:
+            result['total_working_days'] = 1
+        
+        # Adjust if total_present_days exceeds total_working_days
+        if result['total_present_days'] > result['total_working_days']:
+            overflow = result['total_present_days'] - result['total_working_days']
+            result['total_present_days'] = Decimal(str(result['total_working_days']))
+            result['extra_days']['od_days'] += overflow
+        
+        # Ensure total_absent_days is not negative
+        if result['total_absent_days'] < 0:
+            result['total_absent_days'] = Decimal('0.0')
+        
+        result['extra_days']['total'] = (
+            result['extra_days']['od_days'] -
+            result['extra_days']['gate_pass_deductions']
+        )
+    
+    
