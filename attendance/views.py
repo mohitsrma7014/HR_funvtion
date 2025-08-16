@@ -2977,31 +2977,36 @@ class ProcessDailyAttendanceAPI(APIView):
         departments = [emp.employee_department for emp in employees]
         employee_ids = [emp.id for emp in employees]
         
+      
         return {
             'gate_passes': GatePass.objects.filter(
                 employee_id__in=employee_ids,
-                date=start_date  # Only for the specific date
+                date__gte=start_date,
+                date__lt=end_date
             ).select_related('employee'),
             
             'shift_assignments': ShiftAssignment.objects.filter(
                 employee_id__in=employee_ids,
-                start_date__lte=start_date,
+                start_date__lte=end_date,
                 end_date__gte=start_date
             ).select_related('employee'),
             
             'od_slips': ODSlip.objects.filter(
                 employee_id__in=employee_ids,
-                od_date=start_date  # Only for the specific date
+                od_date__gte=start_date,
+                od_date__lt=end_date
             ).select_related('employee'),
             
             'sunday_replacements': SundayReplacement.objects.filter(
                 Q(department__isnull=True) | Q(department__in=departments),
-                sunday_date=start_date  # Only for the specific date
+                sunday_date__gte=start_date,
+                sunday_date__lt=end_date
             ),
             
             'holidays': Holiday.objects.filter(
                 Q(department__isnull=True) | Q(department__in=departments),
-                holiday_date=start_date  # Only for the specific date
+                holiday_date__gte=start_date,
+                holiday_date__lt=end_date
             ),
             
             'manual_punches': ManualPunch.objects.filter(
@@ -3022,6 +3027,7 @@ class ProcessDailyAttendanceAPI(APIView):
         ]
         
         all_logs = []
+        extended_end_date = end_date + timedelta(days=1)
         
         for machine in machines:
             try:
@@ -3037,7 +3043,7 @@ class ProcessDailyAttendanceAPI(APIView):
   <soap:Body>
     <GetTransactionsLog xmlns="http://tempuri.org/">
       <FromDateTime>{start_date.strftime('%Y-%m-%dT%H:%M:%S')}</FromDateTime>
-      <ToDateTime>{end_date.strftime('%Y-%m-%dT%H:%M:%S')}</ToDateTime>
+      <ToDateTime>{extended_end_date.strftime('%Y-%m-%dT%H:%M:%S')}</ToDateTime>
       <SerialNumber>{machine['serial']}</SerialNumber>
       <UserName>{machine['username']}</UserName>
       <UserPassword>{machine['password']}</UserPassword>
@@ -3090,11 +3096,9 @@ class ProcessDailyAttendanceAPI(APIView):
     def process_employee_attendance(self, employee, start_date, end_date, 
                                   gate_passes, shift_assignments, od_slips, 
                                   sunday_replacements, holidays, manual_punches, punch_logs):
-        """Process attendance for a single employee for a specific date"""
+        """Process attendance for a single employee with proper timezone handling"""
         # Initialize result structure
         result = self.initialize_attendance_result(employee, start_date)
-        
-        date = start_date
         
         # Filter employee-specific data
         emp_gate_passes = [gp for gp in gate_passes if gp.employee_id == employee.id]
@@ -3102,54 +3106,58 @@ class ProcessDailyAttendanceAPI(APIView):
         emp_manual_punches = [mp for mp in manual_punches if mp.employee_id == employee.id]
         emp_punch_logs = [log for log in punch_logs if log['employee_id'] == employee.employee_id]
         
-        # Process the specific date
-        day_record = self.initialize_day_record(employee, date)
-        
-        # Apply shift assignments if rotational
-        self.apply_shift_assignments(day_record, employee, date, shift_assignments)
-        
-        # Check for holidays and Sundays
-        if self.process_special_days(day_record, result, employee, date, 
-                                    holidays, sunday_replacements, emp_od_slips):
+        # Process each day in the month
+        for day in rrule.rrule(rrule.DAILY, dtstart=start_date, until=end_date-timedelta(days=1)):
+            date = day.date()
+            day_record = self.initialize_day_record(employee, date)
+            
+            # Apply shift assignments if rotational
+            self.apply_shift_assignments(day_record, employee, date, shift_assignments)
+            
+            # Check for holidays and Sundays
+            if self.process_special_days(day_record, result, employee, date, 
+                                        holidays, sunday_replacements, emp_od_slips):
+                result['daily_attendance'].append(day_record)
+                continue
+            
+            # Process OD slips
+            self.process_od_slips(day_record, result, date, emp_od_slips)
+            
+            # Process gate passes
+            self.process_gate_passes(day_record, result, date, emp_gate_passes, employee)
+            
+            # Process punches
+            self.process_punches(day_record, result, employee, date, 
+                               emp_punch_logs, emp_manual_punches)
+            
             result['daily_attendance'].append(day_record)
-            return result
         
-        # Process OD slips
-        self.process_od_slips(day_record, result, date, emp_od_slips)
-        
-        # Process gate passes
-        self.process_gate_passes(day_record, result, date, emp_gate_passes, employee)
-        
-        # Process punches
-        self.process_punches(day_record, result, employee, date, 
-                           emp_punch_logs, emp_manual_punches)
-        
-        result['daily_attendance'].append(day_record)
-        
-        # Calculate summary statistics for the single day
+        # Calculate summary statistics
         self.calculate_summary_statistics(result, start_date, end_date, 
                                         sunday_replacements, employee)
         
+        
         return result
     
-    def initialize_attendance_result(self, employee, date):
-        """Initialize the result structure for an employee for a single day"""
+    def initialize_attendance_result(self, employee, start_date):
+        """Initialize the result structure for an employee"""
         return {
             'employee_id': employee.employee_id,
             'employee_name': employee.employee_name,
             'department': employee.employee_department,
             'employee_type': employee.employee_type,
             'shift_type': employee.shift_type,
-            'date': date,
+            'month': start_date.month,
+            'year': start_date.year,
             'daily_attendance': [],
-            'total_days_in_period': 1,
+            'total_days_in_month': 0,
             'total_working_days': 0,
             'total_present_days': Decimal('0.0'),
             'total_absent_days': Decimal('0.0'),
             'total_leave_days': 0,
-            'is_sunday': date.weekday() == 6,
+            'sundays_in_month': 0,
             'gets_sundays_off': employee.is_getting_sunday,
-            'is_holiday': False,
+            'total_holiday_days': 0,
             'extra_days': {
                 'od_display': '',
                 'od_days': Decimal('0.0'),
@@ -3200,6 +3208,10 @@ class ProcessDailyAttendanceAPI(APIView):
                             if sa.employee_id == employee.id and 
                             sa.start_date <= date <= sa.end_date), None)
             if assignment:
+                # if employee.employee_id == 'SSB015':
+                #     print(f"[DEBUG] Shift assignment found for {employee.employee_id} on {date}:")
+                #     print(f"[DEBUG] Overriding {employee.working_time_in}->{employee.working_time_out}")
+                #     print(f"[DEBUG] With {assignment.working_time_in}->{assignment.working_time_out}")
                 day_record['shift_type'] = assignment.shift_type
                 day_record['scheduled_in'] = assignment.working_time_in
                 day_record['scheduled_out'] = assignment.working_time_out
@@ -3207,7 +3219,10 @@ class ProcessDailyAttendanceAPI(APIView):
             # For non-rotational shifts, use employee defaults
             day_record['scheduled_in'] = employee.working_time_in
             day_record['scheduled_out'] = employee.working_time_out
-    
+            # if employee.employee_id == 'SSB015':
+            #     print(f"[DEBUG] Using employee defaults for {employee.employee_id} on {date}:")
+            #     print(f"[DEBUG] Scheduled times: {employee.working_time_in}->{employee.working_time_out}")
+        
     def process_special_days(self, day_record, result, employee, date, 
                            holidays, sunday_replacements, emp_od_slips):
         """Process holidays and Sundays, returns True if day is special"""
@@ -3222,7 +3237,7 @@ class ProcessDailyAttendanceAPI(APIView):
                 'day_type': 'Holiday',
                 'status': 'Holiday'
             })
-            result['is_holiday'] = True
+            result['total_holiday_days'] += 1
             return True
         
         # Check for Sundays
@@ -3267,7 +3282,7 @@ class ProcessDailyAttendanceAPI(APIView):
             'od_days': od_slip.extra_days,
             'remarks': f"OD - {self.format_od_display(od_slip)}"
         })
-        
+        # Only add to present/absent days if it's not a Sunday
         if day_record['date'].weekday() != 6:  # Not Sunday
             if od_slip.extra_days > 0:
                 result['total_present_days'] += Decimal(str(od_slip.extra_days))
@@ -3276,9 +3291,12 @@ class ProcessDailyAttendanceAPI(APIView):
         
         result['extra_days']['od_hours'] += Decimal(str(od_slip.extra_hours))
 
+        # For Sundays, add the OD days to extra days instead of present days
         if day_record['date'].weekday() == 6:  # Sunday
             result['extra_days']['od_days'] += Decimal(str(od_slip.extra_days))
             
+        
+        # Update the od_display in result
         od_display = []
         if od_slip.extra_days:
             od_display.append(f"{int(od_slip.extra_days)}d")
@@ -3313,11 +3331,11 @@ class ProcessDailyAttendanceAPI(APIView):
         gate_pass = next((gp for gp in emp_gate_passes if gp.date == date), None)
         if gate_pass:
             day_record['gate_pass'] = {
-                'date': gp.date,
-                'out_time': gp.out_time,
-                'approved_by': gp.approved_by,
-                'action_taken': gp.action_taken,
-                'reason': gp.reason
+                'date': gate_pass.date,
+                'out_time': gate_pass.out_time,
+                'approved_by': gate_pass.approved_by,
+                'action_taken': gate_pass.action_taken,
+                'reason': gate_pass.reason
             }
             
             if gate_pass.action_taken == 'FD':
@@ -3326,6 +3344,7 @@ class ProcessDailyAttendanceAPI(APIView):
                     'day_value': Decimal('1.0'),
                     'working_hours': employee.working_hours
                 })
+                # Explicitly add to present days
                 result['total_present_days'] += Decimal('1.0')
                 
             elif gate_pass.action_taken == 'HD':
@@ -3364,16 +3383,20 @@ class ProcessDailyAttendanceAPI(APIView):
     def process_punches(self, day_record, result, employee, date, 
                   emp_punch_logs, emp_manual_punches):
         """Process punches for the day with proper timezone handling"""
+        # Get timezone-aware datetime range for the day
+         # ✅ Skip punch processing if FD_CUT gate pass already applied
         if day_record.get('gate_pass') and day_record['gate_pass'].get('action_taken') in ['FD', 'FD_CUT','HD']:
+            # For full day gate passes, we don't need to process punches
             return
-            
         day_start, day_end = self.get_day_range(date, day_record['shift_type'])
         
+        # Get all punches for the day (including manual)
         day_punches = self.get_day_punches(
             date, day_record['shift_type'], 
             emp_punch_logs, emp_manual_punches
         )
         
+        # Store punches information regardless of OD status
         if day_punches:
             in_punch = day_punches[0]['datetime'].astimezone(self.IST)
             day_record['actual_in'] = in_punch.time()
@@ -3384,17 +3407,21 @@ class ProcessDailyAttendanceAPI(APIView):
                 day_record['actual_out'] = out_punch.time()
                 day_record['is_manual_out'] = day_punches[-1].get('is_manual', False)
         
+        # If it's an OD day, but both in and out punches are available, mark as Present
         if day_record['status'] in ['On Duty', 'On Duty (Sunday)']:
             if 'actual_in' in day_record and 'actual_out' in day_record:
                 day_record['status'] = 'Present'
             else:
                 return
+
         
+        # Process based on shift type
         if day_record['shift_type'] in ['DAY', 'ROT']:
             self.process_day_shift(day_record, result, employee, date, day_punches)
         elif day_record['shift_type'] == 'NIGHT':
             self.process_night_shift(day_record, result, employee, date, day_punches)
         
+        # Update day value based on status
         self.update_day_value(day_record, result)
     
     def get_day_range(self, date, shift_type):
@@ -3403,27 +3430,34 @@ class ProcessDailyAttendanceAPI(APIView):
         day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time.min))
         
         if shift_type == 'NIGHT':
+            # For night shift, extend the range to include the next day's punches
             day_end = self.IST.localize(datetime.combine(date + timedelta(days=2), time.min))
         
+        # Convert to UTC for consistent comparison
         return day_start.astimezone(self.UTC), day_end.astimezone(self.UTC)
     
     def get_day_punches(self, date, shift_type, emp_punch_logs, emp_manual_punches):
         """Get all punches for the day including manual punches"""
         if shift_type == 'NIGHT':
+            # For night shift, look from 4PM current day to 10AM next day
             day_start = self.IST.localize(datetime.combine(date, time(16, 0)))
             day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time(10, 0)))
         else:
+            # For day/rotational shifts, look at the calendar day
             day_start = self.IST.localize(datetime.combine(date, time.min))
             day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time.min))
         
+        # Convert to UTC for comparison
         day_start = day_start.astimezone(self.UTC)
         day_end = day_end.astimezone(self.UTC)
 
+        # Get biometric punches
         day_punches = [
             log for log in emp_punch_logs 
             if day_start <= log['datetime'] < day_end
         ]
 
+        # Add both manual in and out punches if present
         for mp in emp_manual_punches:
             if mp.punch_in_time:
                 punch_time_in = mp.punch_in_time.astimezone(self.UTC)
@@ -3447,12 +3481,15 @@ class ProcessDailyAttendanceAPI(APIView):
                         'reason': mp.reason
                     })
 
+        # Sort punches by time
         day_punches.sort(key=lambda x: x['datetime'])
         return day_punches
+
     
     def process_day_shift(self, day_record, result, employee, date, day_punches):
+
         is_sunday_without_off = (date.weekday() == 6 and not employee.is_getting_sunday)
-        
+        """Process day shift punches"""
         if len(day_punches) >= 2:
             in_punch = day_punches[0]['datetime'].astimezone(self.IST)
             out_punch = day_punches[-1]['datetime'].astimezone(self.IST)
@@ -3466,9 +3503,11 @@ class ProcessDailyAttendanceAPI(APIView):
                 'manual_reason': day_punches[0].get('reason') or day_punches[-1].get('reason')
             })
             
+            # Calculate working hours
             worked_hours = (out_punch - in_punch).total_seconds() / 3600
             day_record['working_hours'] = Decimal(str(round(worked_hours, 2)))
             
+            # Check for early departure
             if out_punch.time() < time(16, 0) and not day_record['gate_pass']:
                 day_record.update({
                     'status': 'Half Day (Early Departure)',
@@ -3481,6 +3520,7 @@ class ProcessDailyAttendanceAPI(APIView):
             else:
                 result['total_present_days'] += Decimal('1.0')
             
+            # Calculate overtime if eligible
             if employee.is_getting_ot and not day_record['is_od']:
                 scheduled_out = datetime.combine(date, day_record['scheduled_out'])
                 scheduled_out_dt = self.IST.localize(scheduled_out).astimezone(self.UTC)
@@ -3489,11 +3529,26 @@ class ProcessDailyAttendanceAPI(APIView):
                     overtime = (out_punch.astimezone(self.UTC) - scheduled_out_dt).total_seconds() / 3600
                     rounded_overtime = self.round_overtime(overtime)
                     final_ot = max(Decimal('0.0'), rounded_overtime - Decimal('0.5'))
+                    # Ensure overtime is not negative
                     day_record['overtime_hours'] = final_ot
                     result['total_overtime_hours'] += final_ot
+                    # TARGET_EMPLOYEE_ID = 'SSB015'
+
+                    # if employee.employee_id == TARGET_EMPLOYEE_ID:
+                        
+
+                    #     print(f"[DEBUG] EMP ID: {employee.employee_id} | DATE: {date}")
+                    #     print(f"[DEBUG] In Time: {in_punch.time()} | Out Time: {out_punch.time()}")
+                    #     print(f"[DEBUG] Scheduled Out: {day_record['scheduled_out']} | Actual Out: {out_punch.time()}")
+                    #     print(f"[DEBUG] Raw OT: {(out_punch.astimezone(self.UTC) - scheduled_out_dt).total_seconds() / 3600:.2f}")
+                    #     print(f"[DEBUG] Rounded OT: {rounded_overtime}")
+
+                    
+
         
         elif len(day_punches) == 1 and not day_record['gate_pass']:
             punch_time = day_punches[0]['datetime'].astimezone(self.IST).time()
+             # Special case: Sunday + single punch + doesn't get Sunday off
             if is_sunday_without_off:
                 day_record.update({
                     'status': 'Absent',
@@ -3515,20 +3570,29 @@ class ProcessDailyAttendanceAPI(APIView):
                 result['total_half_days'] += Decimal('0.5')
     
     def process_night_shift(self, day_record, result, employee, date, day_punches):
-        current_day_start = self.IST.localize(datetime.combine(date, time(16, 0)))
-        next_day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time(10, 0)))
+        """Process night shift punches with proper two-day span handling"""
+        # For night shift, we need to look at punches from current day 4PM to next day 10AM
+        current_day_start = self.IST.localize(datetime.combine(date, time(16, 0)))  # 4PM current day
+        next_day_end = self.IST.localize(datetime.combine(date + timedelta(days=1), time(10, 0)))  # 10AM next day
         
+        # Filter punches within the night shift window (4PM to 10AM next day)
         night_shift_punches = [
             punch for punch in day_punches
             if current_day_start <= punch['datetime'].astimezone(self.IST) <= next_day_end
         ]
         
+        # Sort punches chronologically
         night_shift_punches.sort(key=lambda x: x['datetime'])
         
+        # Need at least 2 punches (in and out) to consider present
         if len(night_shift_punches) >= 2:
             in_punch = night_shift_punches[0]['datetime'].astimezone(self.IST)
             out_punch = night_shift_punches[-1]['datetime'].astimezone(self.IST)
             
+            # Validate night shift pattern:
+            # 1. In punch should be after 4PM current day
+            # 2. Out punch should be before 10AM next day
+            # 3. Should have worked at least 6 hours
             is_valid = True
             remarks = []
             
@@ -3558,6 +3622,7 @@ class ProcessDailyAttendanceAPI(APIView):
                     'working_hours': Decimal(str(round(duration_hours, 2)))
                 })
                 
+                # Check for full shift completion (8+ hours)
                 if duration_hours >= 8 or day_record.get('gate_pass'):
                     result['total_present_days'] += Decimal('1.0')
                 else:
@@ -3569,8 +3634,9 @@ class ProcessDailyAttendanceAPI(APIView):
                     result['total_present_days'] += Decimal('0.5')
                     result['total_half_days'] += Decimal('0.5')
                 
+                # Calculate overtime if eligible
                 if employee.is_getting_ot and not day_record['is_od']:
-                    scheduled_out = datetime.combine(date + timedelta(days=1), time(4, 0))
+                    scheduled_out = datetime.combine(date + timedelta(days=1), time(4, 0))  # Assuming 6AM end time
                     scheduled_out_dt = self.IST.localize(scheduled_out).astimezone(self.UTC)
                     
                     if out_punch.astimezone(self.UTC) > scheduled_out_dt:
@@ -3578,6 +3644,16 @@ class ProcessDailyAttendanceAPI(APIView):
                         rounded_overtime = self.round_overtime(overtime)
                         day_record['overtime_hours'] = rounded_overtime
                         result['total_overtime_hours'] += rounded_overtime
+                        TARGET_EMPLOYEE_ID = 'SSB015'
+
+                        if employee.employee_id == TARGET_EMPLOYEE_ID:
+                        
+
+                            print(f"[DEBUG] EMP ID: {employee.employee_id} | DATE: {date}")
+                            print(f"[DEBUG] In Time: {in_punch.time()} | Out Time: {out_punch.time()}")
+                            print(f"[DEBUG] Scheduled Out: {day_record['scheduled_out']} | Actual Out: {out_punch.time()}")
+                            print(f"[DEBUG] Raw OT: {(out_punch.astimezone(self.UTC) - scheduled_out_dt).total_seconds() / 3600:.2f}")
+                            print(f"[DEBUG] Rounded OT: {rounded_overtime}")
             else:
                 day_record.update({
                     'status': 'Absent',
@@ -3586,6 +3662,7 @@ class ProcessDailyAttendanceAPI(APIView):
                 result['total_absent_days'] += Decimal('0.0')
         
         elif len(night_shift_punches) == 1 and not day_record['gate_pass']:
+            # Single punch case
             punch_time = night_shift_punches[0]['datetime'].astimezone(self.IST).time()
             day_record.update({
                 'actual_in' if punch_time >= time(16, 0) else 'actual_out': punch_time,
@@ -3611,8 +3688,8 @@ class ProcessDailyAttendanceAPI(APIView):
         if overtime_hours <= 0:
             return Decimal('0.0')
 
-        whole_hours = int(overtime_hours)
-        remaining_minutes = (overtime_hours - whole_hours) * 60
+        whole_hours = int(overtime_hours)  # e.g., 3
+        remaining_minutes = (overtime_hours - whole_hours) * 60  # e.g., 0.34 * 60 = 20.4
 
         if remaining_minutes <= 15:
             extra = Decimal('0.0')
@@ -3623,9 +3700,11 @@ class ProcessDailyAttendanceAPI(APIView):
 
         total_rounded = Decimal(whole_hours) + extra
         return min(total_rounded, Decimal('4.0'))
+
     
     def update_day_value(self, day_record, result):
         """Update day value based on status"""
+        # Skip if this is a gate pass day (already handled in process_gate_passes)
         if day_record.get('gate_pass'):
             return
             
@@ -3638,34 +3717,103 @@ class ProcessDailyAttendanceAPI(APIView):
         elif day_record['status'] == 'Absent':
             day_record['day_value'] = Decimal('0.0')
             result['total_absent_days'] += Decimal('1.0')
+            # Don't increment absent days here - we'll calculate it later
     
     def calculate_summary_statistics(self, result, start_date, end_date, 
                                sunday_replacements, employee):
-        """Calculate summary statistics for the single day"""
-        is_holiday = result['is_holiday']
-        is_sunday = result['is_sunday']
-        gets_sundays_off = result['gets_sundays_off']
+        """Calculate summary statistics for the month"""
+        total_days_in_month = (end_date - start_date).days
         
-        if is_holiday:
-            result['total_working_days'] = 0
-        elif is_sunday and gets_sundays_off:
-            result['total_working_days'] = 0
+        # Count Sundays
+        sundays_in_month = sum(
+            1 for day in rrule.rrule(rrule.DAILY, dtstart=start_date, until=end_date-timedelta(days=1))
+            if day.date().weekday() == 6  # Sunday
+        )
+        
+        # Count regular Sundays (not replaced)
+        regular_sundays = sum(
+            1 for day in rrule.rrule(rrule.DAILY, dtstart=start_date, until=end_date-timedelta(days=1))
+            if day.date().weekday() == 6 and  # Sunday
+            not any(sr for sr in sunday_replacements 
+                if (sr.department is None or sr.department == employee.employee_department) 
+                and sr.sunday_date == day.date())
+        )
+        
+        # Count replaced Sundays
+        replaced_sundays = sum(
+            1 for sr in sunday_replacements
+            if (sr.department is None or sr.department == employee.employee_department) 
+            and start_date <= sr.sunday_date < end_date
+        )
+
+        # For employees who don't get Sundays off, count all days as working days
+        if not employee.is_getting_sunday:
+            total_working_days = total_days_in_month - result['total_holiday_days']
         else:
-            result['total_working_days'] = 1
+            total_working_days = (
+                total_days_in_month - 
+                regular_sundays - 
+                result['total_holiday_days'] +
+                replaced_sundays
+            )
         
+        result.update({
+            'total_days_in_month': total_days_in_month,
+            'sundays_in_month': sundays_in_month,
+            'total_working_days': total_working_days,
+            'total_absent_days': total_working_days - result['total_present_days'],
+            'extra_days': {
+                **result['extra_days'],
+                'total': (
+                    result['extra_days']['od_days'] -
+                    result['extra_days']['gate_pass_deductions']
+                )
+            }
+        })
         # Adjust if total_present_days exceeds total_working_days
-        if result['total_present_days'] > result['total_working_days']:
-            overflow = result['total_present_days'] - result['total_working_days']
-            result['total_present_days'] = Decimal(str(result['total_working_days']))
+        if result['total_present_days'] > total_working_days:
+            overflow = result['total_present_days'] - total_working_days
+            result['total_present_days'] = Decimal(str(total_working_days))
             result['extra_days']['od_days'] += overflow
-        
         # Ensure total_absent_days is not negative
         if result['total_absent_days'] < 0:
             result['total_absent_days'] = Decimal('0.0')
         
-        result['extra_days']['total'] = (
-            result['extra_days']['od_days'] -
-            result['extra_days']['gate_pass_deductions']
-        )
-    
-    
+    def save_processed_data(self, results, month, year):
+        saved_records = []
+        for employee_data in results:
+            try:
+                employee = Employee.objects.get(employee_id=employee_data['employee_id'])
+                
+                # Create or update processed attendance record
+                record, created = ProcessedAttendance.objects.update_or_create(
+                    employee=employee,
+                    month=month,
+                    year=year,
+                    defaults={
+                        'attendance_data': json.loads(json.dumps(employee_data, cls=DjangoJSONEncoder))
+                    }
+                )
+                saved_records.append(record.id)
+            except Employee.DoesNotExist:
+                continue
+            except Exception as e:
+                print(f"Error saving attendance for employee {employee_data['employee_id']}: {str(e)}")
+                continue
+        
+        return saved_records
+
+    def convert_dates_to_strings(self, data):
+        """Recursively convert date objects to ISO format strings"""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, (dict, list)):
+                    self.convert_dates_to_strings(value)
+                elif isinstance(value, date):
+                    data[key] = value.isoformat()
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if isinstance(item, (dict, list)):
+                    self.convert_dates_to_strings(item)
+                elif isinstance(item, date):
+                    data[i] = item.isoformat()
