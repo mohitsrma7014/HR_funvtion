@@ -853,7 +853,7 @@ class ProcessAttendanceAPI(APIView):
         start_date, end_date = self.get_date_range(year, month)
         
         # Step 3: Fetch all relevant data in bulk for performance
-        employees = Employee.objects.all()
+        employees = Employee.objects.filter(is_active=True)
         data = self.fetch_attendance_data(employees, start_date, end_date)
         
         # Step 4: Process attendance for each employee
@@ -2177,7 +2177,8 @@ class MissedPunchReportAPI(APIView):
             )
         
         # Get all employees
-        employees = Employee.objects.all()
+        employees = Employee.objects.filter(is_active=True)
+
         
         # Fetch all relevant data in bulk for performance
         gate_passes = GatePass.objects.filter(
@@ -2948,7 +2949,7 @@ class ProcessDailyAttendanceAPI(APIView):
         end_date = process_date + timedelta(days=1)
         
         # Step 3: Fetch all relevant data in bulk for performance
-        employees = Employee.objects.all()
+        employees = Employee.objects.filter(is_active=True)
         data = self.fetch_attendance_data(employees, start_date, end_date)
         
         # Step 4: Process attendance for each employee
