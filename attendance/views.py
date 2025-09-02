@@ -2690,26 +2690,38 @@ class SalaryCalculationAPI(APIView):
         # Handle CL days - subtract from absent and add to present
         available_cl = employee.no_of_cl  # Total CL available to the employee
         working_hours = float(employee.working_hours)  # Total CL available to the employee
+        # Track if we used CL to become completely present
+        used_cl_to_become_present = False
+    
         cl_used = min(available_cl, absent_days)  # Can't use more CL than absent days
         od_days = int(float(attendance_data.get('extra_days', {}).get('od_days', 0)))
-        
+        if od_days > 0:
+            # Calculate how many OD days can be used to offset absent days
+            od_used_for_absent = min(od_days, absent_days)
+            
+            # Adjust present, absent, and OD days
+            present_days += od_used_for_absent
+            absent_days -= od_used_for_absent
+            od_days -= od_used_for_absent
         # Adjust present and absent days based on CL usage 
+        if absent_days > 0 and (absent_days - cl_used) == 0:
+            used_cl_to_become_present = True
+
         adjusted_present = present_days + cl_used
         adjusted_absent = absent_days - cl_used
         
         # Calculate eligible sundays based on adjusted absent days
         eligible_sundays = sundays if employee.is_getting_sunday else 0
-        if od_days == 0:
         # Apply sunday deduction rules based on adjusted absent days
-            if eligible_sundays > 0 and adjusted_absent >= 3:
-                if adjusted_absent >= 9:
-                    eligible_sundays = 0
-                elif adjusted_absent >= 7:
-                    eligible_sundays = max(0, eligible_sundays - 3)
-                elif adjusted_absent >= 5:
-                    eligible_sundays = max(0, eligible_sundays - 2)
-                else:
-                    eligible_sundays = max(0, eligible_sundays - 1)
+        if eligible_sundays > 0 and adjusted_absent >= 3:
+            if adjusted_absent >= 10:
+                eligible_sundays = 0
+            elif adjusted_absent >= 7:
+                eligible_sundays = max(0, eligible_sundays - 3)
+            elif adjusted_absent >= 5:
+                eligible_sundays = max(0, eligible_sundays - 2)
+            else:
+                eligible_sundays = max(0, eligible_sundays - 1)
         
         # Calculate gross salary based on monthly/daily salary type
         if employee.is_monthly_salary:
@@ -2719,11 +2731,11 @@ class SalaryCalculationAPI(APIView):
         else:
             # Daily wage calculation (salary is already per day)
             gross_salary = round((adjusted_present + eligible_sundays) * float(employee.salary), 2)
-        if employee.employee_id == 'SSB129':
-            print(gross_salary)
-            print(adjusted_present)
-            print(eligible_sundays)
-            print(per_day_salary)
+        # if employee.employee_id == 'SSB129':
+        #     print(gross_salary)
+        #     print(adjusted_present)
+        #     print(eligible_sundays)
+        #     print(per_day_salary)
         
         # Calculate salary components
         basic_salary = round(gross_salary / 2, 2)
@@ -2736,8 +2748,10 @@ class SalaryCalculationAPI(APIView):
             pf = round(pf_base * 0.12, 2)
         
         attdence_bonous=0
-        if employee.employee_department=='CNC' and Process_total_present_dayes==total_days:
-            attdence_bonous=1000
+        if (employee.employee_department == 'CNC' and 
+            Process_total_present_dayes == total_days and
+            not used_cl_to_become_present):
+            attdence_bonous = 1000
         
         # ESIC calculation (0.75% of gross if salary <= 22500)
         esic = 0
@@ -2766,7 +2780,6 @@ class SalaryCalculationAPI(APIView):
         
         # Calculate OD payment
         od_payment = 0
-        od_days = int(float(attendance_data.get('extra_days', {}).get('od_days', 0)))
         od_hours = float(attendance_data.get('extra_days', {}).get('od_hours', 0))
 
         if od_days > 0 or od_hours > 0:
@@ -2809,7 +2822,9 @@ class SalaryCalculationAPI(APIView):
             "total_prdction_incentive": total_prdction_incentive,
             "net_salary": net_salary,
             "cl_used": cl_used,  # Add CL used to the response
-            "cl_remaining": available_cl - cl_used  # Add remaining CL to the response
+            "cl_remaining": available_cl - cl_used,  # Add remaining CL to the response
+            "eligible_sundays": eligible_sundays,
+            "payable_dayes": Process_total_present_dayes,
         }
 from .serializers import SalaryAdvanceSerializer, BulkSalaryAdvanceSerializer,ProdctionIncentiveSerializer,BulkProdctionIncentiveSerializer
 
