@@ -29,7 +29,8 @@ class Employee(models.Model):
         ('SECURITY', 'SECURITY'),
         ('DISPATCH', 'DISPATCH'),
         ('ELECTRICAL', 'ELECTRICAL'),
-
+        ('Marking', 'Marking'),
+         ('Demagnetize', 'Demagnetize'),
         ('FI-MARKING', 'FI-MARKING'),
         ('FI-FINAL INSPECTION', 'FI-FINAL INSPECTION'),
         ('FI-D MAGNET', 'FI-D MAGNET'),
@@ -70,6 +71,8 @@ class Employee(models.Model):
         ('Visual', 'Visual'),
         ('Helper', 'Helper'),
         ('Developer', 'Developer'),
+        ('Marking', 'Marking'),
+        ('Demagnetize', 'Demagnetize'),
         ('Quality Head', 'Quality Head'),
         ('SAFETY & SECURITY INCHARGE', 'SAFETY & SECURITY INCHARGE'),
     )
