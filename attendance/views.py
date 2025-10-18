@@ -2578,7 +2578,8 @@ class SalaryCalculationAPI(APIView):
         
         # Bulk fetch all relevant employees to minimize DB queries
         employees = Employee.objects.filter(
-            employee_id__in=employee_ids
+            employee_id__in=employee_ids,
+            employee_type='FT' 
         ).only(
             'employee_id', 'employee_name', 'employee_department', 'salary',
             'is_getting_sunday', 'is_getting_ot', 'no_of_cl', 'employee_type','working_hours','is_getting_pf','is_monthly_salary','incentive'
@@ -2826,6 +2827,357 @@ class SalaryCalculationAPI(APIView):
             "eligible_sundays": eligible_sundays,
             "payable_dayes": Process_total_present_dayes,
         }
+    
+
+class ContractSalaryCalculationAPI(APIView):
+    """
+    API endpoint for calculating employee salaries based on attendance data.
+    Handles large datasets efficiently with optimized queries.
+    """
+    def post(self, request, format=None):
+        """
+        Save processed salary data for a month/year
+        """
+        month = request.data.get('month')
+        year = request.data.get('year')
+        results = request.data.get('results', [])
+        
+        if not month or not year:
+            return Response(
+                {"error": "Both month and year parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            month = int(month)
+            year = int(year)
+            if month < 1 or month > 12:
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "Invalid month or year format"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if data already exists for this month/year
+        if ProcessedSalary.objects.filter(month=month, year=year).exists():
+            return Response(
+                {"error": "Salary data already processed for this month/year"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create salary records in bulk
+        salary_records = []
+        for result in results:
+            try:
+                employee = Employee.objects.get(employee_id=result['employee_id'])
+                salary_records.append(ProcessedSalary(
+                    employee=employee,
+                    month=month,
+                    year=year,
+                    data=result
+                ))
+            except Employee.DoesNotExist:
+                continue  # Or collect these missing employees for error reporting
+
+        
+        try:
+            ProcessedSalary.objects.bulk_create(salary_records)
+            return Response(
+                {"message": f"Successfully saved {len(salary_records)} salary records"},
+                status=status.HTTP_201_CREATED
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def get(self, request, format=None):
+        month = request.query_params.get('month')
+        year = request.query_params.get('year')
+        
+        if not month or not year:
+            return Response(
+                {"error": "Both month and year parameters are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            month = int(month)
+            year = int(year)
+            if month < 1 or month > 12:
+                raise ValueError
+        except ValueError:
+            return Response(
+                {"error": "Invalid month or year format"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Start timing for performance measurement
+        start_time = datetime.now()
+        
+        # Bulk fetch all processed attendance for the month/year to minimize DB queries
+        attendance_records = ProcessedAttendance.objects.filter(
+            month=month,
+            year=year
+        ).select_related('employee')
+        
+        # Get all employee IDs in one query
+        employee_ids = attendance_records.values_list('employee__employee_id', flat=True)
+        
+        # Bulk fetch all relevant employees to minimize DB queries
+        employees = Employee.objects.filter(
+            employee_id__in=employee_ids,
+            employee_type='CT' 
+        ).only(
+            'employee_id', 'employee_name', 'employee_department', 'salary',
+            'is_getting_sunday', 'is_getting_ot', 'no_of_cl', 'employee_type','working_hours','is_getting_pf','is_monthly_salary','incentive'
+        )
+        
+        # Create a dictionary for quick employee lookup
+        employee_dict = {emp.employee_id: emp for emp in employees}
+        
+        results = []
+        
+        for record in attendance_records:
+            employee = employee_dict.get(record.employee.employee_id)
+            if not employee:
+                continue
+                
+            attendance_data = record.attendance_data
+            
+            # Calculate salary components
+            salary_breakdown = self.calculate_salary(employee, attendance_data)
+            
+            results.append({
+                "employee_id": employee.employee_id,
+                "employee_name": employee.employee_name,
+                "department": employee.employee_department,
+                "employee_type": employee.employee_type,
+                "Fix_Incentive": employee.incentive,
+                "month": month,
+                "year": year,
+                "total_month_days": attendance_data.get('total_days_in_month', 30),
+                "od_days": attendance_data.get('od_days', 0),
+                "od_hours": attendance_data.get('od_hours', 0),
+                "total_working_days": attendance_data.get('total_working_days', 0),
+                "present_days": attendance_data.get('total_present_days', 0),
+                "sundays": attendance_data.get('sundays_in_month', 0),
+                "absent_days": attendance_data.get('total_absent_days', 0),
+                "leave_days": attendance_data.get('total_leave_days', 0),
+                "holiday_days": attendance_data.get('total_holiday_days', 0),
+                "od_days": attendance_data.get('extra_days', {}).get('od_days', 0),
+                "od_hours": attendance_data.get('extra_days', {}).get('od_hours', 0),
+                "overtime_hours": attendance_data.get('total_overtime_hours', 0),
+                "actual_salary": float(employee.salary),
+                **salary_breakdown
+            })
+        
+        # End timing and log performance
+        processing_time = (datetime.now() - start_time).total_seconds()
+        
+        return Response({
+            "month": month,
+            "year": year,
+            "count": len(results),
+            "processing_time_seconds": processing_time,
+            "results": results
+        })
+    def get_salary_advance(self, employee, month, year):
+        advances = SalaryAdvance.objects.filter(
+            employee=employee,
+            date_issued__year=year,
+            date_issued__month=month
+        ).aggregate(total_advance=Sum('amount'))
+
+        return advances['total_advance'] or 0
+    
+    def get_prdction_incentive(self, employee, month, year):
+        production_incentive = ProdctionIncentive.objects.filter(
+            employee=employee,
+            date_issued__year=year,
+            date_issued__month=month
+        ).aggregate(total_prdction_incentive=Sum('amount'))
+
+        return production_incentive['total_prdction_incentive'] or 0
+
+    
+    def calculate_salary(self, employee, attendance_data):
+        """
+        Calculate all salary components based on employee data and attendance.
+        Handles CL days by:
+        1. Subtracting CL from absent days and adding to present days
+        2. Only considering the CL days the employee actually has (no_of_cl)
+        3. Deducting Sundays after adjusting for CL
+        """
+        # Initialize all components with 0
+        salary_components = {
+            "gross_salary": 0,
+            "basic_salary": 0,
+            "hra": 0,
+            "medical_allowance": 0,
+            "conveyance_allowance": 0,
+            "pf": 0,
+            "esic": 0,
+            "incentive": 0,
+            "overtime_payment": 0,
+            "od_payment": 0,
+            "total_salary": 0,
+            "net_salary": 0
+        }
+        
+        if not employee.salary or employee.salary <= 0:
+            return salary_components
+        
+        total_days = int(attendance_data.get('total_days_in_month', 30))
+        present_days = float(attendance_data.get('total_present_days', 0))
+        absent_days = float(attendance_data.get('total_absent_days', 0))
+        sundays = int(attendance_data.get('sundays_in_month', 0))
+        leave_days = float(attendance_data.get('total_leave_days', 0))
+        per_day_salary = float(employee.salary) / total_days
+        fix_incentive = float(employee.incentive) if employee.incentive else 0
+        per_day_fixincentive = fix_incentive / total_days if total_days else 0
+        # Handle CL days - subtract from absent and add to present
+        available_cl = employee.no_of_cl  # Total CL available to the employee
+        working_hours = float(employee.working_hours)  # Total CL available to the employee
+        # Track if we used CL to become completely present
+        used_cl_to_become_present = False
+    
+        cl_used = min(available_cl, absent_days)  # Can't use more CL than absent days
+        od_days = int(float(attendance_data.get('extra_days', {}).get('od_days', 0)))
+        if od_days > 0:
+            # Calculate how many OD days can be used to offset absent days
+            od_used_for_absent = min(od_days, absent_days)
+            
+            # Adjust present, absent, and OD days
+            present_days += od_used_for_absent
+            absent_days -= od_used_for_absent
+            od_days -= od_used_for_absent
+        # Adjust present and absent days based on CL usage 
+        if absent_days > 0 and (absent_days - cl_used) == 0:
+            used_cl_to_become_present = True
+
+        adjusted_present = present_days + cl_used
+        adjusted_absent = absent_days - cl_used
+        
+        # Calculate eligible sundays based on adjusted absent days
+        eligible_sundays = sundays if employee.is_getting_sunday else 0
+        # Apply sunday deduction rules based on adjusted absent days
+        if eligible_sundays > 0 and adjusted_absent >= 3:
+            if adjusted_absent >= 10:
+                eligible_sundays = 0
+            elif adjusted_absent >= 7:
+                eligible_sundays = max(0, eligible_sundays - 3)
+            elif adjusted_absent >= 5:
+                eligible_sundays = max(0, eligible_sundays - 2)
+            else:
+                eligible_sundays = max(0, eligible_sundays - 1)
+        
+        # Calculate gross salary based on monthly/daily salary type
+        if employee.is_monthly_salary:
+            # Monthly salary calculation (divide by total days * present days)
+            per_day_salary = float(employee.salary) / total_days
+            gross_salary = round((adjusted_present + eligible_sundays) * per_day_salary, 2)
+        else:
+            # Daily wage calculation (salary is already per day)
+            gross_salary = round((adjusted_present + eligible_sundays) * float(employee.salary), 2)
+        # if employee.employee_id == 'SSB129':
+        #     print(gross_salary)
+        #     print(adjusted_present)
+        #     print(eligible_sundays)
+        #     print(per_day_salary)
+        
+        # Calculate salary components
+        basic_salary = 0
+        total_fix_incentive = round((adjusted_present + eligible_sundays) * per_day_fixincentive , 2)
+        # PF calculation (12% of basic, max 15000)
+        Process_total_present_dayes=adjusted_present + eligible_sundays
+        pf = 0
+        if employee.is_getting_pf:
+            pf_base = min(basic_salary, 15000)
+            pf = round(pf_base * 0.12, 2)
+        
+        attdence_bonous=0
+        if (employee.employee_department == 'CNC' and 
+            Process_total_present_dayes == total_days and
+            not used_cl_to_become_present):
+            attdence_bonous = 1000
+        
+        # ESIC calculation (0.75% of gross if salary <= 22500)
+        esic = 0
+        if employee.salary <= 21100:
+            esic = 0
+        
+        # HRA (50% of basic)
+        hra = round(basic_salary * 0.5, 2)
+        
+        # Medical allowance (50% of HRA)
+        medical_allowance = round(hra * 0.5, 2)
+        
+        # Conveyance allowance (50% of HRA)
+        conveyance_allowance = round(hra * 0.5, 2)
+        
+        # Calculate overtime payment if eligible
+        overtime_payment = 0
+        if employee.is_getting_ot:
+            overtime_hours = float(attendance_data.get('total_overtime_hours', 0))
+            if overtime_hours > 0:
+                if employee.is_monthly_salary:
+                    per_hour_rate = float(employee.salary) / (total_days * (working_hours))
+                else:
+                    per_hour_rate = float(employee.salary) / (working_hours)
+                overtime_payment = round(overtime_hours * per_hour_rate, 2)
+        
+        # Calculate OD payment
+        od_payment = 0
+        od_hours = float(attendance_data.get('extra_days', {}).get('od_hours', 0))
+
+        if od_days > 0 or od_hours > 0:
+            if employee.is_monthly_salary:
+                per_day_rate = float(employee.salary) / total_days
+                per_hour_rate = per_day_rate / float((working_hours))
+            else:
+                per_day_rate = float(employee.salary)
+                per_hour_rate = per_day_rate /float((working_hours))
+            
+            od_payment = round((od_days * per_day_rate) + (od_hours * per_hour_rate), 2)
+        
+        # Calculate incentive (overtime + OD)
+        incentive = round(overtime_payment + od_payment, 2)
+        
+        # Calculate total salary
+        total_salary = round(gross_salary + incentive + total_fix_incentive + attdence_bonous , 2)
+
+        salary_advance = self.get_salary_advance(employee, attendance_data.get('month'), attendance_data.get('year'))
+        total_prdction_incentive = self.get_prdction_incentive(employee, attendance_data.get('month'), attendance_data.get('year'))
+
+        # Adjust final salary
+        net_salary = round(Decimal(total_salary) - salary_advance + total_prdction_incentive, 2)
+
+        return {
+            "gross_salary": gross_salary,
+            "basic_salary": basic_salary,
+            "hra": hra,
+            "medical_allowance": medical_allowance,
+            "conveyance_allowance": conveyance_allowance,
+            "pf": pf,
+            "attdence_bonous":attdence_bonous,
+            "esic": esic,
+            "incentive": incentive,
+            "total_fix_incentive": total_fix_incentive,
+            "overtime_payment": overtime_payment,
+            "od_payment": od_payment,
+            "total_salary": total_salary,
+            "salary_advance": salary_advance,
+            "total_prdction_incentive": total_prdction_incentive,
+            "net_salary": net_salary,
+            "cl_used": cl_used,  # Add CL used to the response
+            "cl_remaining": available_cl - cl_used,  # Add remaining CL to the response
+            "eligible_sundays": eligible_sundays,
+            "payable_dayes": Process_total_present_dayes,
+        }
+    
 from .serializers import SalaryAdvanceSerializer, BulkSalaryAdvanceSerializer,ProdctionIncentiveSerializer,BulkProdctionIncentiveSerializer
 
 class SalaryAdvanceViewSet(viewsets.ModelViewSet):

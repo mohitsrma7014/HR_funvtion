@@ -5,7 +5,7 @@ from .views import (
     EmployeeViewSet, GatePassViewSet, ShiftAssignmentViewSet,
     ODSlipViewSet, SundayReplacementViewSet, HolidayViewSet,
     ManualPunchViewSet,EmployeeViewSet1,EmployeeViewSet2,ProcessedAttendanceAPIView,MissedPunchReportAPI,SalaryCalculationAPI,EmployeeDocumentViewSet,SalaryAdvanceViewSet,EmployeeViewSetadvance
-,ActiveEmployeeListAPIView,productionincentiveViewSet,
+,ActiveEmployeeListAPIView,productionincentiveViewSet,ContractSalaryCalculationAPI,
     EmployeeDocumentListCreateAPIView,EmployeeDocumentRetrieveUpdateDestroyAPIView)
 
 router = DefaultRouter()
@@ -34,6 +34,7 @@ urlpatterns = [
     path('save/attendancesave/', ProcessedAttendanceAPIView.as_view(), name='processed-attendance'),
     path('misspunch/', MissedPunchReportAPI.as_view(), name='MissedPunch-ReportAPI'),
     path('salary-calculation/', SalaryCalculationAPI.as_view(), name='salary-calculation'),
+    path('ContractSalaryCalculationAPI/', ContractSalaryCalculationAPI.as_view(), name='ContractSalaryCalculationAPI'),
     path('employees-active/', ActiveEmployeeListAPIView.as_view(), name='active-employees-list'),
     path('documents/', EmployeeDocumentListCreateAPIView.as_view(), name='employee-documents-list-create'),
     path('documents/<int:id>/', EmployeeDocumentRetrieveUpdateDestroyAPIView.as_view(), name='employee-document-detail'),
