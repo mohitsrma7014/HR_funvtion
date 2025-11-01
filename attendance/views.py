@@ -3377,11 +3377,12 @@ class ProcessDailyAttendanceAPI(APIView):
                 holiday_date__lt=end_date
             ),
             
+            
             'manual_punches': ManualPunch.objects.filter(
                 employee_id__in=employee_ids
             ).filter(
-                Q(punch_in_time__gte=tz_start, punch_in_time__lt=tz_end) |
-                Q(punch_out_time__gte=tz_start, punch_out_time__lt=tz_end)
+                Q(punch_in_time__gte=tz_start, punch_in_time__lt=(tz_end + timedelta(days=1))) |
+                Q(punch_out_time__gte=tz_start, punch_out_time__lt=(tz_end + timedelta(days=1)))
             ).select_related('employee'),
             
             'punch_logs': self.fetch_punch_logs(start_date, end_date)
