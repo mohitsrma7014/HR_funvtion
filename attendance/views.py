@@ -2717,7 +2717,7 @@ class SalaryCalculationAPI(APIView):
         if eligible_sundays > 0 and adjusted_absent >= 3:
             if adjusted_absent >= 10:
                 eligible_sundays = 0
-            elif adjusted_absent >= 7:
+            elif adjusted_absent >= 8:
                 eligible_sundays = max(0, eligible_sundays - 3)
             elif adjusted_absent >= 5:
                 eligible_sundays = max(0, eligible_sundays - 2)
@@ -3067,7 +3067,7 @@ class ContractSalaryCalculationAPI(APIView):
         if eligible_sundays > 0 and adjusted_absent >= 3:
             if adjusted_absent >= 10:
                 eligible_sundays = 0
-            elif adjusted_absent >= 7:
+            elif adjusted_absent >= 8:
                 eligible_sundays = max(0, eligible_sundays - 3)
             elif adjusted_absent >= 5:
                 eligible_sundays = max(0, eligible_sundays - 2)
