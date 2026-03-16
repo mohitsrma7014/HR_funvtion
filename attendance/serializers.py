@@ -109,15 +109,20 @@ class BulkProdctionIncentiveSerializer(serializers.ListSerializer):
     child = ProdctionIncentiveSerializer()
 
 class GatePassSerializer(serializers.ModelSerializer):
-    employee_name = serializers.CharField(source='employee.employee_name', read_only=True)
-    employee_id = serializers.CharField(source='employee.employee_id', read_only=True)
-    
+
+    employee_name = serializers.CharField(
+        source='employee.employee_name',
+        read_only=True
+    )
+
+    employee_id = serializers.CharField(
+        source='employee.employee_id',
+        read_only=True
+    )
+
     class Meta:
         model = GatePass
-        fields = '__all__'
-        extra_kwargs = {
-            'employee': {'write_only': True}
-        }
+        fields = "__all__"
 
 class ShiftAssignmentSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.employee_name', read_only=True)

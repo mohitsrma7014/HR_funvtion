@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+from corsheaders.defaults import default_headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -95,7 +96,9 @@ CORS_ALLOWED_ORIGINS = [
     "http://192.168.1.199:8002",
     "http://192.168.1.199:3000",
 ]
-
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-user-department",
+]
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 

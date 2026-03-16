@@ -158,24 +158,55 @@ class EmployeeDocument(models.Model):
         return os.path.basename(self.document_file.name)
 
 
+from django.db import models
+from django.conf import settings
+from simple_history.models import HistoricalRecords
+
+
 class GatePass(models.Model):
+
     ACTION_CHOICES = (
         ('FD', 'Full Day'),
         ('HD', 'Half Day Cut'),
         ('FD_CUT', 'Full Day Cut'),
     )
 
-    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='gate_passes')
-    date = models.DateField()  # New date field
+    STATUS_CHOICES = (
+        ('PENDING', 'Pending'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+    )
+
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='gate_passes'
+    )
+
+    date = models.DateField()
     out_time = models.TimeField()
-    approved_by = models.CharField(max_length=100)
+
     action_taken = models.CharField(max_length=7, choices=ACTION_CHOICES)
+
     reason = models.CharField(max_length=255, blank=True, null=True)
 
-    history = HistoricalRecords()  # track history here too
+    # workflow
+    created_by = models.CharField(max_length=120)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default='PENDING'
+    )
+
+    approved_by = models.CharField(max_length=120, blank=True, null=True)
+    approved_at = models.DateTimeField(blank=True, null=True)
+
+    history = HistoricalRecords()
 
     def __str__(self):
-        return f"Gate Pass - {self.employee.employee_name} ({self.out_time})"
+        return f"{self.employee.employee_name} - {self.date}"
     
 class ShiftAssignment(models.Model):
     SHIFT_CHOICES = (

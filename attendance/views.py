@@ -1606,7 +1606,7 @@ class ProcessAttendanceAPI(APIView):
 
         if remaining_minutes <= 15:
             extra = Decimal('0.0')
-        elif remaining_minutes <= 40:
+        elif remaining_minutes <= 46:
             extra = Decimal('0.5')
         else:
             extra = Decimal('1.0')
@@ -1762,10 +1762,11 @@ class GatePassFilter(django_filters.FilterSet):
     employee_name = django_filters.CharFilter(field_name='employee__employee_name', lookup_expr='icontains')
     date = django_filters.DateFromToRangeFilter(field_name='date')
     action_taken = django_filters.CharFilter(field_name='action_taken')
-    
+    status = django_filters.CharFilter(field_name='status')   # ✅ ADD THIS
+
     class Meta:
         model = GatePass
-        fields = ['employee_id', 'employee_name', 'date', 'action_taken']
+        fields = ['employee_id', 'employee_name', 'date', 'action_taken','status']
 
 class ShiftAssignmentFilter(django_filters.FilterSet):
     employee_id = django_filters.CharFilter(field_name='employee__employee_id', lookup_expr='icontains')
@@ -1997,6 +1998,29 @@ class EmployeeViewSet1(viewsets.ModelViewSet):
     ordering_fields = ['employee_id', 'employee_name', 'employee_department']
     ordering = ['employee_id']
 
+    def get_queryset(self):
+
+        department = self.request.headers.get("X-USER-DEPARTMENT")
+
+        qs = Employee.objects.all()
+
+        if not department:
+            return qs.none()
+
+        department = department.upper()
+
+        # Admin / HR / Accounts → all
+        if department in ["ADMIN", "HR", "ACCOUNTS"]:
+            return qs
+
+        if department == "MACHINING":
+            return qs.filter(employee_department="CNC")
+
+        if department == "FORGING":
+            return qs.filter(employee_department="FORGING")
+
+        return qs.filter(employee_department=department)
+
 class EmployeeViewSet2(viewsets.ModelViewSet):
     serializer_class = EmployeeSerializer
     pagination_class = None  # disables pagination
@@ -2008,15 +2032,55 @@ class EmployeeViewSet2(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return Employee.objects.filter(shift_type='ROT').select_related()
+    
+from django.utils import timezone
 
 class GatePassViewSet(viewsets.ModelViewSet):
-    queryset = GatePass.objects.all().select_related('employee')
     serializer_class = GatePassSerializer
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_class = GatePassFilter
+    pagination_class = None
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+
     search_fields = ['employee__employee_id', 'employee__employee_name', 'approved_by']
     ordering_fields = ['date', 'out_time', 'employee__employee_name']
     ordering = ['-date']
+
+    def get_queryset(self):
+        queryset = GatePass.objects.select_related('employee')
+
+        status = self.request.query_params.get("status")
+
+        if status:
+            queryset = queryset.filter(status=status)
+
+        return queryset
+    
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+
+        gatepass = self.get_object()
+
+        if gatepass.status != "PENDING":
+            return Response({"error": "Already processed"}, status=400)
+
+        gatepass.status = "APPROVED"
+        gatepass.approved_by = request.data.get("approved_by")
+        gatepass.approved_at = timezone.now()
+        gatepass.save()
+
+        return Response({"message": "Gate pass approved"})
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+
+        gatepass = self.get_object()
+
+        gatepass.status = "REJECTED"
+        gatepass.approved_by = request.data.get("approved_by")
+        gatepass.approved_at = timezone.now()
+
+        gatepass.save()
+
+        return Response({"message": "Gate pass rejected"})
 
 class ShiftAssignmentViewSet(viewsets.ModelViewSet):
     queryset = ShiftAssignment.objects.all().select_related('employee')
@@ -4062,7 +4126,7 @@ class ProcessDailyAttendanceAPI(APIView):
 
         if remaining_minutes <= 15:
             extra = Decimal('0.0')
-        elif remaining_minutes <= 40:
+        elif remaining_minutes <= 46:
             extra = Decimal('0.5')
         else:
             extra = Decimal('1.0')

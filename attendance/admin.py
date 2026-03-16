@@ -13,10 +13,11 @@ class EmployeeAdmin(ImportExportModelAdmin,SimpleHistoryAdmin):
 from .models import GatePass
 
 @admin.register(GatePass)
-class GatePassAdmin(SimpleHistoryAdmin):
+class GatePassAdmin(ImportExportModelAdmin, SimpleHistoryAdmin):
     list_display = ('employee', 'out_time', 'approved_by', 'action_taken')
     search_fields = ('employee__employee_name', 'approved_by')
     list_filter = ('action_taken',)
+
 
 from .models import ShiftAssignment
 
