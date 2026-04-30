@@ -104,6 +104,20 @@ class Employee(models.Model):
     incentive = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     is_active = models.BooleanField(default=True, help_text="Designates whether the employee is active or inactive")
 
+    uan_number = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        unique=True
+    )
+
+    ip_number = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        unique=True
+    )
+
     joining_date = models.DateField(null=True, blank=True)
     leaving_date = models.DateField(null=True, blank=True)
     

@@ -895,7 +895,8 @@ class ProcessAttendanceAPI(APIView):
             'gate_passes': GatePass.objects.filter(
                 employee_id__in=employee_ids,
                 date__gte=start_date,
-                date__lt=end_date
+                date__lt=end_date,
+                status='APPROVED' 
             ).select_related('employee'),
             
             'shift_assignments': ShiftAssignment.objects.filter(
@@ -2248,7 +2249,8 @@ class MissedPunchReportAPI(APIView):
         gate_passes = GatePass.objects.filter(
             employee__in=employees,
             date__gte=start_date,
-            date__lt=end_date
+            date__lt=end_date,
+            status='APPROVED' 
         ).select_related('employee')
         
         shift_assignments = ShiftAssignment.objects.filter(
@@ -3414,7 +3416,8 @@ class ProcessDailyAttendanceAPI(APIView):
             'gate_passes': GatePass.objects.filter(
                 employee_id__in=employee_ids,
                 date__gte=start_date,
-                date__lt=end_date
+                date__lt=end_date,
+                status='APPROVED' 
             ).select_related('employee'),
             
             'shift_assignments': ShiftAssignment.objects.filter(
@@ -4250,3 +4253,156 @@ class ProcessDailyAttendanceAPI(APIView):
                     self.convert_dates_to_strings(item)
                 elif isinstance(item, date):
                     data[i] = item.isoformat()
+
+
+
+import csv
+from django.http import HttpResponse
+from rest_framework.decorators import api_view
+from .models import ProcessedSalary
+
+@api_view(['GET'])
+def generate_pf_challan(request):
+    month = int(request.GET.get('month'))
+    year = int(request.GET.get('year'))
+
+    salaries = ProcessedSalary.objects.select_related('employee').filter(
+        month=month,
+        year=year,
+        employee__is_active=True,
+        employee__employee_type='FT',
+        employee__is_getting_pf=True
+    )
+
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="pf_challan_{month}_{year}.csv"'
+
+    writer = csv.writer(response)
+
+    # ✅ Updated Header (Added Employee ID)
+    writer.writerow([
+        "Employee ID", "Member Name", "Gross Wages",
+        "EPF Wages", "EPS Wages", "EDLI Wages",
+        "EPF Contribution remitted", "EPS Contribution remitted",
+        "EPF and EPS Diff remitted", "NCP Days", "Refund of Advances"
+    ])
+
+    def to_float(val):
+        try:
+            return float(val)
+        except:
+            return 0
+
+    for sal in salaries:
+        data = sal.data
+
+        emp_id = data.get("employee_id", "")
+        name = data.get("employee_name", "")
+
+        gross = to_float(data.get("gross_salary"))
+        basic = to_float(data.get("basic_salary"))
+        pf = to_float(data.get("pf"))
+        absent_days = to_float(data.get("absent_days"))-to_float(data.get("cl_used"))
+
+        if gross == 0:
+            continue
+
+        # ✅ PF Logic
+        epf_wage = min(basic, 15000)
+
+        # ✅ Convert everything to INTEGER (EPFO requirement)
+        epf_wage = int(round(epf_wage))
+        gross = int(round(gross))
+        pf = int(round(pf))
+
+        eps = int(round(epf_wage * 0.0833))   # 8.33%
+        epf_diff = pf - eps
+
+        writer.writerow([
+            emp_id,
+            name,
+            gross,
+            epf_wage,
+            epf_wage,
+            epf_wage,
+            pf,
+            eps,
+            epf_diff,
+            int(round(absent_days)),
+            0
+        ])
+
+    return response
+
+
+
+@api_view(['GET'])
+def generate_esi_challan(request):
+    month = int(request.GET.get('month'))
+    year = int(request.GET.get('year'))
+
+    salaries = ProcessedSalary.objects.select_related('employee').filter(
+        month=month,
+        year=year,
+        employee__is_active=True,
+        employee__employee_type='FT',
+        employee__salary__lt=22500
+    )
+
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="esi_challan_{month}_{year}.csv"'
+
+    writer = csv.writer(response)
+
+    # ✅ Updated Header (Added Employee ID)
+    writer.writerow([
+        "Employee ID", "IP Name", "No of Days for which wages paid/payable during the month","Total Monthly Wages"," Reason Code for Zero workings days(numeric only; provide 0 for all other reasons)"," Last Working Day( Format DD/MM/YYYY  or DD-MM-YYYY)"
+        
+    ])
+
+    def to_float(val):
+        try:
+            return float(val)
+        except:
+            return 0
+
+    for sal in salaries:
+        data = sal.data
+
+        emp_id = data.get("employee_id", "")
+        name = data.get("employee_name", "")
+
+        gross = to_float(data.get("gross_salary"))
+        basic = to_float(data.get("basic_salary"))
+        pf = to_float(data.get("pf"))
+        absent_days = to_float(data.get("payable_dayes"))
+
+        if gross == 0:
+            continue
+
+        # ✅ PF Logic
+        epf_wage = min(basic, 15000)
+
+        # ✅ Convert everything to INTEGER (EPFO requirement)
+        epf_wage = int(round(epf_wage))
+        gross = int(round(gross))
+        pf = int(round(pf))
+
+        code = 0 if gross > 0 else 1
+
+        eps = int(round(epf_wage * 0.0833))   # 8.33%
+        epf_diff = pf - eps
+
+        writer.writerow([
+            emp_id,
+            name,
+            int(round(absent_days)),
+            gross,
+            
+            code,
+           
+            
+            ""
+        ])
+
+    return response

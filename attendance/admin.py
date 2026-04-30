@@ -76,7 +76,7 @@ class ProcessedAttendanceAdmin(admin.ModelAdmin):
 from .models import ProcessedSalary,ProdctionIncentive
 
 @admin.register(ProcessedSalary)
-class ProcessedSalaryAdmin(admin.ModelAdmin):
+class ProcessedSalaryAdmin(ImportExportModelAdmin, admin.ModelAdmin):
     list_display = ('employee', 'month', 'year', 'created_at', 'updated_at')
     list_filter = ('month', 'year', 'employee')
     search_fields = ('employee__employee_name',)

@@ -5,7 +5,7 @@ from .views import (
     EmployeeViewSet, GatePassViewSet, ShiftAssignmentViewSet,
     ODSlipViewSet, SundayReplacementViewSet, HolidayViewSet,
     ManualPunchViewSet,EmployeeViewSet1,EmployeeViewSet2,ProcessedAttendanceAPIView,MissedPunchReportAPI,SalaryCalculationAPI,EmployeeDocumentViewSet,SalaryAdvanceViewSet,EmployeeViewSetadvance
-,ActiveEmployeeListAPIView,productionincentiveViewSet,ContractSalaryCalculationAPI,
+,ActiveEmployeeListAPIView,productionincentiveViewSet,ContractSalaryCalculationAPI,generate_pf_challan,generate_esi_challan,
     EmployeeDocumentListCreateAPIView,EmployeeDocumentRetrieveUpdateDestroyAPIView)
 
 router = DefaultRouter()
@@ -38,4 +38,6 @@ urlpatterns = [
     path('employees-active/', ActiveEmployeeListAPIView.as_view(), name='active-employees-list'),
     path('documents/', EmployeeDocumentListCreateAPIView.as_view(), name='employee-documents-list-create'),
     path('documents/<int:id>/', EmployeeDocumentRetrieveUpdateDestroyAPIView.as_view(), name='employee-document-detail'),
+    path('pf-challan/', generate_pf_challan),
+    path('esi-challan/', generate_esi_challan),
 ]
